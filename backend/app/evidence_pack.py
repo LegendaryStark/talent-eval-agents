@@ -3,8 +3,11 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from typing import Annotated, Literal
+from openai import APIConnectionError, APITimeoutError, RateLimitError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +73,21 @@ fully_supported 仅表示当前材料直接覆盖当前要求全部要素，缺�
 原文引用正确不代表事实已经独立核实。不评分、不推荐候选人。"""
 
 
-def model_extractor(model):
+def model_extractor(
+    model,
+    *,
+    max_attempts: int = 1,
+    backoff_seconds: float = 0.5,
+    retryable_exceptions: tuple[type[Exception], ...] | None = None,
+):
+    if max_attempts < 1:
+        raise ValueError("max_attempts 必须大于等于 1")
+    retryable = retryable_exceptions or (
+        APIConnectionError,
+        APITimeoutError,
+        RateLimitError,
+    )
+
     def extract(requirement, sources):
         source_aliases = {
             f'source_{index}': row['chunk_id']
@@ -84,13 +101,28 @@ def model_extractor(model):
             ],
             'output_schema': EvidenceExtraction.model_json_schema(),
         }
-        raw = model.with_structured_output(
+        structured_model = model.with_structured_output(
             EvidenceExtraction,
             method='json_mode',
-        ).invoke([
+        )
+        messages = [
             ('system', EXTRACTION_PROMPT),
             ('user', json.dumps(payload, ensure_ascii=False)),
-        ])
+        ]
+        for attempt in range(1, max_attempts + 1):
+            try:
+                raw = structured_model.invoke(messages)
+                break
+            except retryable as exc:
+                if attempt >= max_attempts:
+                    raise
+                logger.warning(
+                    'event=evidence_model_retry function=model_extractor '
+                    'attempt=%s max_attempts=%s error_type=%s',
+                    attempt, max_attempts, type(exc).__name__,
+                )
+                if backoff_seconds:
+                    time.sleep(backoff_seconds * (2 ** (attempt - 1)))
         data = raw if isinstance(raw, EvidenceExtraction) else EvidenceExtraction.model_validate(raw)
         facts = [
             fact.model_copy(

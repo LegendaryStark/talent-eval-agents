@@ -31,7 +31,7 @@ class TalentToolContext:
 @dataclass(frozen=True)
 class ToolPolicy:
     max_attempts: int = 2
-    timeout_seconds: float = 3.0
+    timeout_seconds: float | None = 3.0
     backoff_seconds: float = 0.05
 
 

@@ -474,7 +474,7 @@ def test_structured_dimension_scorer_uses_anchors_and_evidence_without_counter_f
         def __init__(self):
             self.messages = None
 
-        def with_structured_output(self, schema):
+        def with_structured_output(self, schema, **kwargs):
             assert schema is DimensionJudgement
             return self
 
@@ -523,7 +523,7 @@ def test_structured_dimension_scorer_uses_short_evidence_refs_and_restores_chunk
         def __init__(self):
             self.messages = None
 
-        def with_structured_output(self, schema):
+        def with_structured_output(self, schema, **kwargs):
             assert schema is DimensionJudgement
             return self
 
@@ -593,7 +593,7 @@ def test_structured_report_writer_receives_ranked_assessments_and_verified_evide
         def __init__(self):
             self.messages = None
 
-        def with_structured_output(self, schema):
+        def with_structured_output(self, schema, **kwargs):
             assert schema is ReportDraft
             return self
 
@@ -658,7 +658,7 @@ def test_structured_report_writer_restores_short_refs_before_validation():
         def __init__(self):
             self.messages = None
 
-        def with_structured_output(self, schema):
+        def with_structured_output(self, schema, **kwargs):
             assert schema is ReportDraft
             return self
 
@@ -808,7 +808,7 @@ def test_structured_consistency_reviewer_uses_only_scored_evidence():
         def __init__(self):
             self.messages = None
 
-        def with_structured_output(self, schema):
+        def with_structured_output(self, schema, **kwargs):
             assert schema is ConsistencyReview
             return self
 
@@ -882,7 +882,7 @@ def test_structured_consistency_reviewer_restores_short_refs():
         def __init__(self):
             self.messages = None
 
-        def with_structured_output(self, schema):
+        def with_structured_output(self, schema, **kwargs):
             assert schema is ConsistencyReview
             return self
 

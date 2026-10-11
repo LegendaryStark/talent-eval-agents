@@ -17,6 +17,7 @@ import {
   X,
 } from "lucide-react";
 import { EvidencePackPanel } from "./EvidencePackPanel";
+import { TalentChatPage } from "./TalentChatPage";
 import "./style.css";
 import "./refinements.css";
 
@@ -525,6 +526,7 @@ function RecallLab({
 }
 
 function App() {
+  const [productSection, setProductSection] = useState<"records" | "chat">("records");
   const [page, setPage] = useState<"roster" | "library">("roster");
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [kbs, setKbs] = useState<KB[]>([]);
@@ -705,6 +707,17 @@ function App() {
     }
   }
 
+  if (productSection === "chat") {
+    return (
+      <TalentChatPage
+        apiBase={API}
+        sidebarCollapsed={sidebarCollapsed}
+        onToggleSidebar={() => setSidebarCollapsed((value) => !value)}
+        onOpenRecords={() => setProductSection("records")}
+      />
+    );
+  }
+
   function toggleDocumentSelection(documentId: string, checked: boolean) {
     setSelectedDocs((current) =>
       checked ? Array.from(new Set([...current, documentId])) : current.filter((item) => item !== documentId),
@@ -738,7 +751,7 @@ function App() {
             <UserSquare2 />
             <span>人才档案</span>
           </button>
-          <button>
+          <button onClick={() => setProductSection("chat")}>
             <Sparkles />
             <span>评估与推荐</span>
           </button>

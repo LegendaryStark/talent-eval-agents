@@ -351,7 +351,7 @@ def build_structured_dimension_scorer(
             "branch": _branch_model_payload(branch, chunk_to_model),
             "evidence_items": safe_evidence,
         }
-        result = model.with_structured_output(DimensionJudgement).invoke(
+        result = model.with_structured_output(DimensionJudgement, method="function_calling").invoke(
             [
                 ("system", DIMENSION_SCORER_PROMPT),
                 ("user", json.dumps(payload, ensure_ascii=False)),
@@ -411,30 +411,37 @@ def build_structured_report_writer(
             "candidate_assessments": candidate_payloads,
             "evidence_items": safe_evidence,
         }
-        result = model.with_structured_output(ReportDraft).invoke(
+        result = model.with_structured_output(ReportDraft, method="function_calling").invoke(
             [
                 ("system", REPORT_WRITER_PROMPT),
                 ("user", json.dumps(payload, ensure_ascii=False)),
             ]
         )
         draft = ReportDraft.model_validate(result)
+        allowed_refs_by_candidate = {
+            candidate.candidate_id: {
+                ref_id
+                for dimension in candidate.dimensions
+                for ref_id in dimension.evidence_refs
+            }
+            for candidate in candidates
+        }
         restored_candidates = []
         for candidate in draft.candidates:
+            allowed_refs = allowed_refs_by_candidate.get(candidate.candidate_id, set())
+            restored_highlights = []
+            for point in candidate.highlights:
+                restored_refs = _restore_evidence_refs(
+                    point.evidence_refs,
+                    model_to_chunk,
+                )
+                if restored_refs and all(ref_id in allowed_refs for ref_id in restored_refs):
+                    restored_highlights.append(
+                        point.model_copy(update={"evidence_refs": restored_refs})
+                    )
             restored_candidates.append(
                 candidate.model_copy(
-                    update={
-                        "highlights": [
-                            point.model_copy(
-                                update={
-                                    "evidence_refs": _restore_evidence_refs(
-                                        point.evidence_refs,
-                                        model_to_chunk,
-                                    )
-                                }
-                            )
-                            for point in candidate.highlights
-                        ]
-                    }
+                    update={"highlights": restored_highlights}
                 )
             )
         return draft.model_copy(update={"candidates": restored_candidates})
@@ -476,7 +483,7 @@ def build_structured_consistency_reviewer(
             "dimension_assessments": assessment_payloads,
             "evidence_items": safe_evidence,
         }
-        result = model.with_structured_output(ConsistencyReview).invoke(
+        result = model.with_structured_output(ConsistencyReview, method="function_calling").invoke(
             [
                 ("system", CONSISTENCY_REVIEW_PROMPT),
                 ("user", json.dumps(payload, ensure_ascii=False)),

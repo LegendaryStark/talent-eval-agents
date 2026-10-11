@@ -64,7 +64,13 @@ def _route_after_evaluation(
     )
 
 
-def build_talent_decision_engine(*, request_graph: Any, evaluation_graph: Any, report_graph: Any):
+def build_talent_decision_engine(
+    *,
+    request_graph: Any,
+    evaluation_graph: Any,
+    report_graph: Any,
+    checkpointer: Any | None = None,
+):
     builder = StateGraph(
         TalentDecisionEngineState,
         context_schema=DecisionContext,
@@ -86,4 +92,8 @@ def build_talent_decision_engine(*, request_graph: Any, evaluation_graph: Any, r
         {"report": "report_subgraph", "stop": END},
     )
     builder.add_edge("report_subgraph", END)
-    return builder.compile()
+    return (
+        builder.compile(checkpointer=checkpointer)
+        if checkpointer is not None
+        else builder.compile()
+    )

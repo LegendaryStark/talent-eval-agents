@@ -8,6 +8,8 @@ from starlette.requests import Request
 from app.api import router
 from app.config import get_settings
 from app.logging_config import configure_logging
+from app.talent_run_api import router as talent_run_router
+from app.talent_run_stream import TalentRunManager
 
 
 settings = get_settings()
@@ -15,8 +17,9 @@ configure_logging(settings.log_dir, settings.service_name)
 logger = logging.getLogger(__name__)
 
 
-def create_app() -> FastAPI:
+def create_app(*, talent_run_manager: TalentRunManager | None = None) -> FastAPI:
     app = FastAPI(title="人才文档解析 API", version="0.1.0")
+    app.state.talent_run_manager = talent_run_manager or TalentRunManager()
     app.add_middleware(
         CORSMiddleware,
         allow_origins=get_settings().cors_origins.split(","),
@@ -55,6 +58,7 @@ def create_app() -> FastAPI:
         return {"service": "talent-document-api", "status": "ok"}
 
     app.include_router(router)
+    app.include_router(talent_run_router)
     return app
 
 

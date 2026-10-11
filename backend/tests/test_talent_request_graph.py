@@ -196,3 +196,34 @@ def test_no_job_match_ends_without_building_plan():
     assert result["clarifications"] == [
         {"expression": "量子招聘架构师", "reason": "未找到可确认的岗位 JD"}
     ]
+
+
+def test_model_interpreter_prompt_distinguishes_region_from_current_position(monkeypatch):
+    from app import talent_request_graph as module
+
+    captured: dict[str, object] = {}
+
+    class CapturingModel:
+        def with_structured_output(self, schema, **kwargs):
+            captured["schema"] = schema
+            return self
+
+        def invoke(self, messages):
+            captured["messages"] = messages
+            return {
+                "input_mode": "detailed_requirement",
+                "filters": [{"field": "region", "operator": "eq", "value": "上海"}],
+                "semantic_requirements": [],
+                "evaluation_preferences": [],
+                "clarifications": [],
+            }
+
+    monkeypatch.setattr(module, "get_chat_model", lambda temperature=0: CapturingModel())
+
+    result = module.model_request_interpreter("筛选地区在上海的候选人")
+
+    system_prompt = captured["messages"][0][1]
+    assert "region: 工作地区" in system_prompt
+    assert "current_position: 当前岗位" in system_prompt
+    assert "地名只能映射为 region" in system_prompt
+    assert result.filters[0].field.value == "region"

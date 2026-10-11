@@ -134,6 +134,7 @@ DIMENSION_GENERATOR_PROMPT = """你负责把已编译的人才要求转成可取
 hard_conditions 已用于候选人过滤，不得再生成评分维度。
 语义要求的来源使用原 requirement_id，偏好按顺序使用 preference:1、preference:2。
 维度之间不得重复，必须能通过候选人档案或原始材料取证。
+每个 semantic_condition 或 evaluation_preference 只生成一个维度，不得把同一条要求拆成多个维度。
 权重使用整数百分比且合计为 100。评分锚点固定为 0、3、5 分。
 retrieval_hints 应给出可直接用于候选人证据检索的关键词组合。
 """.strip()
@@ -251,7 +252,10 @@ def build_structured_dimension_generator(
             "talent_request": talent_request,
             "query_plan": query_plan,
         }
-        result = model.with_structured_output(EvaluationDimensionPlan).invoke(
+        result = model.with_structured_output(
+            EvaluationDimensionPlan,
+            method="function_calling",
+        ).invoke(
             [
                 ("system", DIMENSION_GENERATOR_PROMPT),
                 ("user", json.dumps(payload, ensure_ascii=False)),
@@ -443,7 +447,11 @@ def build_evidence_branch_worker(service: Any, executor: ToolExecutor) -> Branch
                 result.status, result.reason, result.extraction_status,
                 len(result.facts), len(result.citations),
             )
-            return result, normalized_call_id, bool(meta.get("degraded"))
+            return (
+                result,
+                normalized_call_id,
+                bool(meta.get("degraded")) or result.extraction_status == "failed",
+            )
 
         indexed_requirements = list(
             enumerate(work_item.dimension.evidence_requirements, start=1)

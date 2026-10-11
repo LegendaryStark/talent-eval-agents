@@ -16,7 +16,7 @@
 
 ## 产品定位
 
-前端是多 Agent 人才评估与推荐系统的统一应用壳层，人才档案模块包含员工花名册和档案资料库。花名册维护结构化员工数据，提供新建员工和每页 10 人分页。档案资料库支持新建知识库、切换知识库、查看文件数量和删除空知识库；非空知识库需要先删除或迁移材料。文件表按每页 10 条分页，上传后自动排入解析、切片和 Milvus 索引链路，同时支持批量删除材料与关联数据。文件详情展示原文件、解析结果、索引记录、切片预览与基础元数据。档案资料库页面内置证据召回测试，可输入查询并附带候选人、材料类型和权限范围过滤项，直接查看匹配 Chunk、相似度分数和来源材料
+前端是多 Agent 人才评估与推荐系统的统一应用壳层。人才档案模块包含员工花名册、档案资料库和证据召回验收台，评估与推荐模块提供人才要求输入、SSE 运行步骤、并行进度、HITL 选项、条件修订、Markdown 报告、引用抽屉和 Run 标识。后端 Run API 支持创建、事件订阅、人工恢复和幂等取消
 
 ## 运行模式
 
@@ -112,6 +112,10 @@ docker compose -p talent-eval-agents-course --profile app up -d --build
 | `POST /api/talent-search/candidates` | 校验 Query Plan，并用确定性 SQL Builder 返回候选人编号集合 |
 | `POST /api/talent-search` | 输入自然语言查询，依次执行 Query Plan、SQL 候选筛选、混合检索和可选查询优化，返回 Chunk 列表 |
 | `POST /api/index-jobs/{id}/retry` | 为失败的 Milvus 索引任务创建新的幂等重试任务 |
+| `POST /api/runs` | 创建人才评估 Run |
+| `GET /api/runs/{id}/events` | 订阅当前 Run 的 SSE 事件 |
+| `POST /api/runs/{id}/resume` | 提交 HITL 选项并恢复运行 |
+| `DELETE /api/runs/{id}` | 幂等取消 Run |
 
 ## 第 8 课复合人才检索
 
@@ -461,7 +465,9 @@ uv run --no-sync pytest -q \
   tests/test_talent_request_graph.py
 ```
 
-原链路把分支执行状态、事实抽取状态和证据充分性合并成一个 `status`，同时使用 3 秒工具超时包裹包含模型抽取的证据调用，导致真实链路稳定出现全量 `degraded`。当前输出使用顶层 `execution_status` 描述调用是否完成，每条 `RequirementEvidence` 分别保留 `status`、`reason`、`extraction_status`、`facts`、`conflicts`、`missing_information` 和 `citations`。真实并发运行观察到单次证据调用最长耗时 59.13 秒，证据检索工具因此单独使用一次 90 秒超时，避免线程超时后重复发出未终止的模型请求。模型抽取失败不再改写为分支执行失败。
+Chat Model 保持同步 `invoke` 调用方式，全链路仅使用 `CHAT_MODEL`。凡是包含外部 LLM 调用的工具和复合链路，都不在项目的 `ToolExecutor` 中设置额外超时。
+
+`execution_status` 描述分支调用是否完整。每条 `RequirementEvidence` 分别保留 `status`、`reason`、`extraction_status`、`facts`、`conflicts`、`missing_information` 和 `citations`。模型输出校验失败或两个模型均不可用时，取证分支标记为 `degraded`，保留从 PostgreSQL 重读并通过权限校验的原始 `citations`，丢弃未通过校验的模型 `facts`。降级结果不会伪造事实，报告只能使用仍然通过证据门禁的内容。
 
 两组可比实测都包含 6 个候选人 × 维度任务项和 12 次要求级模型调用。外层并发为 3 且分支内串行时，总耗时为 164.30 秒，分支阶段约 147.6 秒。外层默认并发改为 6 且分支内并发后，总耗时为 72.53 秒，分支阶段约 57.5 秒，总耗时降低约 55.9%。12 次要求级调用在约 14 毫秒内全部进入执行，分支阶段最终受最慢一次 57.48 秒的模型调用限制。
 
@@ -562,6 +568,28 @@ uv run --no-sync pytest -q \
 结果输出为 `57 passed, 2 warnings in 1.71s`
 
 后端完整回归结果为 `230 passed, 1 skipped, 2 warnings in 10.57s`
+
+## 第 19 课会话式交互与 SSE 事件协议
+
+| 路径 | 用途 |
+|---|---|
+| `backend/app/talent_run_stream.py` | 驱动真实决策主图，维护 Run 状态、活动连接事件缓冲、HITL 恢复、取消和引用投影 |
+| `backend/app/talent_event_projection.py` | 将内部图更新投影为稳定的 SSE 业务事件和白名单节点输出 |
+| `backend/app/talent_run_api.py` | 提供 Run 创建、SSE 订阅、HITL 恢复和取消接口 |
+| `backend/scripts/verify_talent_run_live.py` | 实际调用 PostgreSQL、Milvus、Rerank 和模型验收完整链路 |
+| `frontend/src/TalentChatPage.tsx` | 完成输入锁定、进度与耗时展示、节点输出抽屉、HITL、取消、Markdown 报告和引用抽屉交互 |
+| `frontend/src/talentRunState.ts` | 使用幂等事件投影构建 Run 状态，累计步骤耗时并冻结暂停或取消步骤 |
+
+默认 Run 并发上限为 6。Chat Model 保持同步调用，全链路仅使用 `CHAT_MODEL`，代码不额外施加 LLM 工具超时。模型取证在连接错误、限流和短暂失败时执行受控重试。条件解析 Prompt 注入 DSL 字段语义，地名约束映射到 `region`，不误写为 `current_position`
+
+运行真实链路验收：
+
+```bash
+cd backend
+uv run python -m scripts.verify_talent_run_live
+```
+
+该脚本先用完整自然语言岗位问题触发岗位确认并提交真实 JD，再用带地区、年限、现任岗位和能力要求的自然语言问题完成小候选集评估。两个场景都读取已入库的合成业务材料，候选人筛选、证据检索、模型取证、评分、报告和引用回查都由正式链路执行，不在 API 层构造固定候选人或报告
 
 ## Chunk 模块
 

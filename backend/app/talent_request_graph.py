@@ -12,7 +12,14 @@ from typing_extensions import TypedDict
 
 from app.database import SessionLocal
 from app.model_provider import get_chat_model
-from app.query_plan import Clarification, FilterCondition, QueryPlan, SemanticRequirement, TaskType
+from app.query_plan import (
+    Clarification,
+    FilterCondition,
+    QueryPlan,
+    SemanticRequirement,
+    TaskType,
+    filter_dsl_catalog,
+)
 from app.talent_decision_graph import DecisionContext
 from app.talent_tools import TalentToolContext, TalentToolService
 
@@ -652,7 +659,10 @@ def build_talent_request_graph(
 MODEL_SYSTEM_PROMPT = """你是人才评估任务编译器。输出 TalentRequestDraft。
 如果输入只有岗位名称或岗位简称，input_mode 使用 job_name，只填写 job_query，不根据岗位名称猜测条件。
 如果输入包含地区、年限、职级、技能、项目经验或偏好，input_mode 使用 detailed_requirement。
-结构化硬条件只能写入 filters。技能、经历和成果写入 semantic_requirements。优先项写入 evaluation_preferences。
+结构化硬条件只能写入 filters，字段定义与允许的操作符如下：
+{filter_dsl}
+地名只能映射为 region，current_position 只表示当前岗位名称，禁止将地名写入 current_position。
+技能、经历和成果写入 semantic_requirements。优先项写入 evaluation_preferences。
 只有歧义或矛盾导致无法形成可执行查询计划时才写入 clarifications。资深、经验丰富等可以用于语义检索或排序的描述写入 semantic_requirements 或 evaluation_preferences，不要求补充年龄等结构化阈值。租户和权限不得从用户文本提取。
 当输入中包含 confirmed_job 时，按照已确认岗位 JD 编译条件，并保留用户补充要求。"""
 
@@ -668,9 +678,13 @@ def model_request_interpreter(request_text: str, selected_job: JobMatch | None =
             f"confirmed_job={selected_job['name']}\n"
             f"job_description={selected_job['content']}"
         )
-    return model.with_structured_output(TalentRequestDraft).invoke(
-        [("system", MODEL_SYSTEM_PROMPT), ("user", user_content)]
+    result = model.with_structured_output(TalentRequestDraft, method="function_calling").invoke(
+        [
+            ("system", MODEL_SYSTEM_PROMPT.format(filter_dsl=filter_dsl_catalog())),
+            ("user", user_content),
+        ]
     )
+    return TalentRequestDraft.model_validate(result)
 
 
 def database_job_lookup(query: str, context: DecisionContext) -> list[JobMatch]:
