@@ -33,6 +33,8 @@ TERMINAL_STATUSES = {
     RunStatus.FAILED,
 }
 
+FAILED_GRAPH_STATUSES = {"capacity_exceeded", "dimension_invalid", "failed"}
+
 
 @dataclass(frozen=True)
 class RunEvent:
@@ -61,6 +63,7 @@ class TalentRun:
     extraction_failures: int = 0
     branch_status_counts: dict[str, int] = field(default_factory=dict)
     graph_status: str = ""
+    graph_errors: list[str] = field(default_factory=list)
     report_emitted: bool = False
 
 
@@ -82,6 +85,7 @@ class TalentRunManager:
         graph_factory: Callable[[], Any] = build_default_run_graph,
         context: DecisionContext | None = None,
         max_concurrency: int = 6,
+        record_store: Any | None = None,
     ) -> None:
         self._graph = graph
         self._graph_factory = graph_factory
@@ -90,6 +94,7 @@ class TalentRunManager:
             permission_scopes=("hr_private",),
         )
         self._max_concurrency = max_concurrency
+        self._record_store = record_store
         self._runs: dict[str, TalentRun] = {}
         self._conditions: dict[str, asyncio.Condition] = {}
 
@@ -156,7 +161,7 @@ class TalentRunManager:
             return
         condition = self._conditions[run_id]
         async with condition:
-            try:
+            try: # SSE 协程持续等待通知，直到收到新事件或超时
                 await asyncio.wait_for(condition.wait(), timeout=timeout)
             except TimeoutError:
                 return
@@ -172,7 +177,19 @@ class TalentRunManager:
             data=data,
         )
         run.events.append(event)
+        if self._record_store is not None:
+            self._record_store.record(event)
         return event
+
+    def list_history(self, *, limit: int = 20) -> list[dict[str, Any]]:
+        if self._record_store is None:
+            return []
+        return self._record_store.list_runs(limit=limit)
+
+    def get_history(self, run_id: str) -> dict[str, Any] | None:
+        if self._record_store is None:
+            return None
+        return self._record_store.get_run(run_id)
 
     async def _emit(self, run: TalentRun, event_type: str, data: dict[str, Any]) -> None:
         if run.status == RunStatus.CANCELLED and event_type != "run.cancelled":
@@ -183,7 +200,7 @@ class TalentRunManager:
     async def _notify(self, run_id: str) -> None:
         condition = self._conditions[run_id]
         async with condition:
-            condition.notify_all()
+            condition.notify_all() # 通知所有等待 SSE 的协程，表示有新事件可用
 
     def _config(self, run: TalentRun) -> dict[str, Any]:
         return {
@@ -216,6 +233,15 @@ class TalentRunManager:
             if run.graph_status == "cancelled":
                 run.status = RunStatus.CANCELLED
                 await self._emit(run, "run.cancelled", {"reason": "graph_cancelled"})
+                return
+            if run.graph_status in FAILED_GRAPH_STATUSES:
+                run.status = RunStatus.FAILED
+                message = "；".join(run.graph_errors) or f"运行失败：{run.graph_status}"
+                await self._emit(
+                    run,
+                    "run.failed",
+                    {"message": message, "graph_status": run.graph_status},
+                )
                 return
             run.status = RunStatus.COMPLETED
             await self._emit(
@@ -283,6 +309,11 @@ class TalentRunManager:
             status = update.get("status")
             if isinstance(status, str):
                 run.graph_status = status
+            errors = update.get("errors")
+            if isinstance(errors, list):
+                for error in errors:
+                    if isinstance(error, str) and error and error not in run.graph_errors:
+                        run.graph_errors.append(error)
             self._collect_evidence(run, update)
             await self._project_progress(run, node, update)
             for event in project_graph_update(

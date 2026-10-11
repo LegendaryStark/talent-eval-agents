@@ -11,12 +11,13 @@
 | `database/migrations/005_chunking.sql` | 第 4 课到第 5 课的唯一幂等增量迁移 |
 | `database/migrations/007_milvus_evidence_index.sql` | 第 6 课 Milvus 索引任务表的幂等增量迁移 |
 | `database/migrations/012_talent_tools.sql` | 第 12 课岗位 JD 与人才工具调用审计表的幂等增量迁移 |
+| `database/migrations/020_run_history.sql` | 第 20 课 Run 与步骤历史表的幂等增量迁移 |
 | `frontend/` | React 前端 |
 | `docker-compose.yml` | 默认启动 PostgreSQL、MinIO、Redis；`app` profile 启动 backend、worker、frontend |
 
 ## 产品定位
 
-前端是多 Agent 人才评估与推荐系统的统一应用壳层。人才档案模块包含员工花名册、档案资料库和证据召回验收台，评估与推荐模块提供人才要求输入、SSE 运行步骤、并行进度、HITL 选项、条件修订、Markdown 报告、引用抽屉和 Run 标识。后端 Run API 支持创建、事件订阅、人工恢复和幂等取消
+前端是多 Agent 人才评估与推荐系统的统一应用壳层。人才档案模块包含员工花名册、档案资料库和证据召回验收台，评估与推荐模块提供人才要求输入、SSE 运行步骤、并行进度、HITL 选项、条件修订、Markdown 报告、引用抽屉、Run 标识和历史结果回看。后端 Run API 支持创建、事件订阅、人工恢复、幂等取消以及运行历史查询
 
 ## 运行模式
 
@@ -441,7 +442,7 @@ uv run --no-sync pytest -q \
 | `backend/tests/test_talent_evaluation_dispatch.py` | 覆盖权重校验、候选人 × 维度分发、reducer 聚合、可信上下文、工具边界、任务上限与失败隔离 |
 | `backend/tests/test_talent_evaluation_branch_agent_live.py` | 使用真实 Chat Model 验证事实抽取、连续原文引用、Evidence Pack 与 Branch Worker 的完整传递 |
 
-本节接收第 14 课的 `TalentRequest` 与 `QueryPlan`。硬条件决定候选人范围，语义要求和评估偏好用于生成动态评估维度。每个维度包含定义、整数权重、证据要求、0/3/5 分锚点、检索提示和需求来源。模型输出不包含维度标识，程序按照维度列表顺序生成 `dimension_number=1..N`，避免模型生成重复标识。Pydantic 负责字段结构约束，`validate_dimension_plan` 只检查权重合计是否为 100。
+本节接收第 14 课的 `TalentRequest` 与 `QueryPlan`。硬条件决定候选人范围，语义要求和评估偏好用于生成动态评估维度。每个维度包含定义、整数权重、证据要求、0/3/5 分锚点、检索提示和需求来源。维度生成 Prompt 要求一般不超过 4 个维度，同一主题的要求合并为一个维度，并通过多个 `retrieval_hints` 扩展检索。模型输出不包含维度标识，程序按照维度列表顺序生成 `dimension_number=1..N`，避免模型生成重复标识。Pydantic 负责字段结构约束，`validate_dimension_plan` 只检查权重合计是否为 100。
 
 候选人与评估维度组成笛卡尔积任务矩阵。LangGraph `Send` 将每个任务发送给独立评估分支，`branch_results` 使用 `operator.add` reducer 聚合结果。验证脚本默认允许 6 个分支并发执行，分支内部再并发处理当前维度的全部 `evidence_requirements`。每条要求组合 `retrieval_hints` 后调用 `search_candidate_evidence`，Future 按提交顺序聚合，因而完成顺序不会改变输出顺序。结果保留 Candidate Evidence Pack 2.0 的事实、来源、冲突、缺失信息和引用指针。`get_candidate_profiles` 不再在候选人 × 维度分支中重复调用。
 
@@ -580,7 +581,7 @@ uv run --no-sync pytest -q \
 | `frontend/src/TalentChatPage.tsx` | 完成输入锁定、进度与耗时展示、节点输出抽屉、HITL、取消、Markdown 报告和引用抽屉交互 |
 | `frontend/src/talentRunState.ts` | 使用幂等事件投影构建 Run 状态，累计步骤耗时并冻结暂停或取消步骤 |
 
-默认 Run 并发上限为 6。Chat Model 保持同步调用，全链路仅使用 `CHAT_MODEL`，代码不额外施加 LLM 工具超时。模型取证在连接错误、限流和短暂失败时执行受控重试。条件解析 Prompt 注入 DSL 字段语义，地名约束映射到 `region`，不误写为 `current_position`
+默认 Run 并发上限为 6。Chat Model 保持同步调用，全链路仅使用 `CHAT_MODEL`，代码不额外施加 LLM 工具超时。模型取证在连接错误、限流和短暂失败时执行受控重试。条件解析 Prompt 注入 DSL 字段语义，地名约束映射到 `region`，不误写为 `current_position`。决策图返回 `capacity_exceeded`、`dimension_invalid` 或 `failed` 时，Run 服务发送 `run.failed` 并保留具体错误，前端停止运行中步骤动画并显示失败原因
 
 运行真实链路验收：
 
@@ -590,6 +591,24 @@ uv run python -m scripts.verify_talent_run_live
 ```
 
 该脚本先用完整自然语言岗位问题触发岗位确认并提交真实 JD，再用带地区、年限、现任岗位和能力要求的自然语言问题完成小候选集评估。两个场景都读取已入库的合成业务材料，候选人筛选、证据检索、模型取证、评分、报告和引用回查都由正式链路执行，不在 API 层构造固定候选人或报告
+
+## 第 20 课运行记录持久化与结果回看
+
+| 路径 | 用途 |
+|---|---|
+| `database/migrations/020_run_history.sql` | 创建 `talent_runs` 与 `talent_run_steps` 的幂等迁移 |
+| `backend/app/talent_run_history.py` | 将 Run 业务事件合并为 Run 与步骤最新快照 |
+| `backend/tests/test_talent_run_history.py` | 验证快照合并、排序与 HITL 耗时 |
+| `frontend/src/talent-run-history.css` | 运行历史列表样式 |
+
+`TalentRunManager` 在生成 `RunEvent` 后同步调用运行记录 Store。`run.started` 创建 Run，`step.started` `step.progress` `step.completed` 按 `run_id + step_id` 更新同一行，`report.completed` 保存 Markdown 报告、引用和 Trace ID。SSE 仍然只承担当前连接的实时交付
+
+| 接口 | 用途 |
+|---|---|
+| `GET /api/runs/history` | 按开始时间倒序返回 Run 列表 |
+| `GET /api/runs/history/{run_id}` | 返回 Run、有序步骤、报告和引用快照 |
+
+前端通过 `historyDetailToRunView()` 将历史详情转换为第 19 课已有的 `RunView`，继续复用步骤时间线、节点输出抽屉、Markdown 报告和证据抽屉
 
 ## Chunk 模块
 

@@ -31,6 +31,19 @@ def _manager(request: Request) -> TalentRunManager:
     return request.app.state.talent_run_manager
 
 
+@router.get("/history")
+async def list_run_history(request: Request, limit: int = 20):
+    return _manager(request).list_history(limit=max(1, min(limit, 100)))
+
+
+@router.get("/history/{run_id}")
+async def get_run_history(run_id: str, request: Request):
+    detail = _manager(request).get_history(run_id)
+    if detail is None:
+        raise HTTPException(404, "运行记录不存在")
+    return detail
+
+
 @router.post("", status_code=status.HTTP_201_CREATED)
 async def create_run(payload: CreateRunInput, request: Request):
     run = await _manager(request).create_run(payload.message)

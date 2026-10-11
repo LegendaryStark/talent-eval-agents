@@ -51,6 +51,28 @@ export type RunView = {
   error: string;
 };
 
+export type RunHistoryDetail = {
+  run_id: string;
+  message: string;
+  status: RunView["status"];
+  report: string;
+  citations: Citation[];
+  trace_id: string;
+  error?: string;
+  steps: Array<{
+    step_id: string;
+    position: number;
+    title: string;
+    kind?: string;
+    status: RunStep["status"];
+    completed?: number;
+    total?: number;
+    summary?: string;
+    output?: Record<string, unknown>;
+    duration_ms?: number;
+  }>;
+};
+
 export const initialRunView: RunView = {
   runId: "",
   lastSequence: 0,
@@ -62,6 +84,32 @@ export const initialRunView: RunView = {
   traceId: "",
   error: "",
 };
+
+export function historyDetailToRunView(detail: RunHistoryDetail): RunView {
+  return {
+    runId: detail.run_id,
+    lastSequence: 0,
+    status: detail.status,
+    steps: [...detail.steps]
+      .sort((left, right) => left.position - right.position)
+      .map((step) => ({
+        stepId: step.step_id,
+        title: step.title,
+        kind: step.kind,
+        status: step.status,
+        completed: step.completed,
+        total: step.total,
+        summary: step.summary,
+        output: step.output,
+        durationMs: step.duration_ms,
+      })),
+    interrupt: null,
+    report: detail.report,
+    citations: detail.citations,
+    traceId: detail.trace_id,
+    error: detail.error || "",
+  };
+}
 
 function text(value: unknown): string {
   return typeof value === "string" ? value : "";

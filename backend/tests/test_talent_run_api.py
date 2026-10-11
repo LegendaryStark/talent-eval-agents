@@ -10,7 +10,12 @@ from langgraph.types import interrupt
 
 from app.main import create_app
 from app.talent_decision_graph import DecisionContext
+from app.models import Base
+from app.talent_run_history import SqlTalentRunHistoryStore
 from app.talent_run_stream import RunEvent, TalentRunManager
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
 
 def _job_selection_manager() -> TalentRunManager:
@@ -37,6 +42,41 @@ def _job_selection_manager() -> TalentRunManager:
             tenant_id="course-demo",
             permission_scopes=("hr_private",),
         ),
+    )
+
+
+def _history_manager() -> TalentRunManager:
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    store = SqlTalentRunHistoryStore(sessionmaker(bind=engine, expire_on_commit=False))
+    store.record(
+        RunEvent(
+            event_id="saved-run:1",
+            sequence=1,
+            type="run.started",
+            run_id="saved-run",
+            timestamp="2026-10-11T01:00:00+00:00",
+            data={"message": "筛选企业知识库项目候选人"},
+        )
+    )
+    store.record(
+        RunEvent(
+            event_id="saved-run:2",
+            sequence=2,
+            type="run.completed",
+            run_id="saved-run",
+            timestamp="2026-10-11T01:00:05+00:00",
+            data={"graph_status": "completed"},
+        )
+    )
+    return TalentRunManager(
+        graph=_job_selection_manager()._get_graph(),
+        context=DecisionContext(tenant_id="course-demo", permission_scopes=("hr_private",)),
+        record_store=store,
     )
 
 
@@ -111,3 +151,25 @@ def test_resume_rejects_unknown_choice():
 
         assert response.status_code == 409
         assert response.json()["detail"] == "请选择有效的岗位"
+
+
+def test_history_endpoints_return_saved_run_and_detail():
+    app = create_app(talent_run_manager=_history_manager())
+
+    with TestClient(app) as client:
+        history = client.get("/api/runs/history")
+        detail = client.get("/api/runs/history/saved-run")
+
+    assert history.status_code == 200
+    assert history.json()[0]["run_id"] == "saved-run"
+    assert detail.status_code == 200
+    assert detail.json()["message"] == "筛选企业知识库项目候选人"
+
+
+def test_history_detail_returns_404_for_unknown_run():
+    app = create_app(talent_run_manager=_history_manager())
+
+    with TestClient(app) as client:
+        response = client.get("/api/runs/history/missing")
+
+    assert response.status_code == 404

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   getComposerPolicy,
+  historyDetailToRunView,
   initialRunView,
   reduceRunEvent,
   shouldCloseStreamForEvent,
@@ -198,5 +199,46 @@ describe("reduceRunEvent", () => {
     expect(report.citations[0].ref).toBe("E1");
     expect(done.status).toBe("completed");
     expect(done.interrupt).toBeNull();
+  });
+});
+
+describe("historyDetailToRunView", () => {
+  it("restores persisted steps report and citations without replaying SSE", () => {
+    const view = historyDetailToRunView({
+      run_id: "saved-run",
+      message: "筛选有 Agent 评测经验的候选人",
+      status: "completed",
+      report: "# 候选人评估报告",
+      citations: [{ ref: "E1", quote: "证据原文" }],
+      trace_id: "trace-1",
+      steps: [
+        {
+          step_id: "filter_candidates",
+          position: 1,
+          title: "筛选候选人",
+          kind: "tool",
+          status: "completed",
+          completed: 1,
+          total: 1,
+          summary: "命中 1 名候选人",
+          output: { candidate_count: 1 },
+          duration_ms: 42,
+        },
+      ],
+    });
+
+    expect(view).toMatchObject({
+      runId: "saved-run",
+      status: "completed",
+      report: "# 候选人评估报告",
+      traceId: "trace-1",
+    });
+    expect(view.steps[0]).toMatchObject({
+      stepId: "filter_candidates",
+      status: "completed",
+      durationMs: 42,
+      output: { candidate_count: 1 },
+    });
+    expect(view.citations[0].ref).toBe("E1");
   });
 });

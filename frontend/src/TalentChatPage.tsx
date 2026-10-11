@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
@@ -21,16 +21,19 @@ import {
 import {
   formatDuration,
   getComposerPolicy,
+  historyDetailToRunView,
   initialRunView,
   reduceRunEvent,
   shouldCloseStreamForEvent,
   type Citation,
   type RunEvent,
+  type RunHistoryDetail,
   type RunView,
   type RunStep,
 } from "./talentRunState";
 import "./talent-chat.css";
 import "./talent-chat-interactions.css";
+import "./talent-run-history.css";
 
 const EVENT_TYPES = [
   "run.started",
@@ -51,6 +54,23 @@ type Props = {
   onToggleSidebar: () => void;
   onOpenRecords: () => void;
 };
+
+type RunHistorySummary = {
+  run_id: string;
+  message: string;
+  status: RunView["status"];
+  started_at: string;
+  completed_at?: string;
+  duration_ms?: number;
+};
+
+function runStatusLabel(status: RunView["status"]): string {
+  if (status === "completed") return "已完成";
+  if (status === "cancelled") return "已取消";
+  if (status === "failed") return "已失败";
+  if (status === "waiting_input") return "待确认";
+  return "进行中";
+}
 
 async function requestJson(url: string, options?: RequestInit) {
   const response = await fetch(url, options);
@@ -110,7 +130,17 @@ export function TalentChatPage({ apiBase, sidebarCollapsed, onToggleSidebar, onO
   const [connection, setConnection] = useState<"idle" | "connected" | "reconnecting">("idle");
   const [activeCitation, setActiveCitation] = useState<Citation | null>(null);
   const [activeStepId, setActiveStepId] = useState("");
+  const [history, setHistory] = useState<RunHistorySummary[]>([]);
   const sourceRef = useRef<EventSource | null>(null);
+
+  async function loadHistory() {
+    const items = await requestJson(`${apiBase}/runs/history`);
+    setHistory(items as RunHistorySummary[]);
+  }
+
+  useEffect(() => {
+    void loadHistory();
+  }, [apiBase]);
 
   function applyEvent(event: RunEvent) {
     setView((current) => reduceRunEvent(current, event));
@@ -121,6 +151,7 @@ export function TalentChatPage({ apiBase, sidebarCollapsed, onToggleSidebar, onO
       sourceRef.current?.close();
       setConnection("idle");
       setBusy(false);
+      void loadHistory();
     } else if (event.type === "hitl.required") {
       setBusy(false);
     }
@@ -201,6 +232,17 @@ export function TalentChatPage({ apiBase, sidebarCollapsed, onToggleSidebar, onO
     setRevision("");
   }
 
+  async function openHistory(runId: string) {
+    sourceRef.current?.close();
+    setConnection("idle");
+    setBusy(false);
+    setActiveCitation(null);
+    setActiveStepId("");
+    const detail = await requestJson(`${apiBase}/runs/history/${runId}`) as RunHistoryDetail;
+    setSubmittedMessage(detail.message);
+    setView(historyDetailToRunView(detail));
+  }
+
   const composerPolicy = getComposerPolicy(view.status);
   const composerLocked = busy || composerPolicy.disabled;
   const activeStep = view.steps.find((step) => step.stepId === activeStepId) || null;
@@ -230,9 +272,8 @@ export function TalentChatPage({ apiBase, sidebarCollapsed, onToggleSidebar, onO
         </header>
         <section className="chatWorkspace">
           <aside className="conversationRail">
-            <button className="newConversation" onClick={reset}><MessageSquarePlus />新建会话</button>
-            <div className="conversationGroup"><small>今天</small><button className="active">高级 AI 应用工程师评估<span>{view.status === "waiting_input" ? "待确认" : view.status === "completed" ? "已完成" : view.status === "cancelled" ? "已取消" : "进行中"}</span></button></div>
-            <div className="conversationGroup"><small>近 7 天</small><button>知识库项目候选人<span>已完成</span></button><button>RAG 架构师推荐<span>已完成</span></button></div>
+            <button className="newConversation" onClick={reset}><MessageSquarePlus />新建运行</button>
+            <div className="conversationGroup"><small>运行记录</small>{history.map((item) => <button key={item.run_id} className={view.runId === item.run_id ? "active" : ""} onClick={() => void openHistory(item.run_id)} title={item.message}>{item.message}<span>{runStatusLabel(item.status)}</span></button>)}{history.length === 0 && <p className="emptyHistory">暂无运行记录</p>}</div>
           </aside>
           <div className="chatPanel">
             <div className="chatHero"><div><span className="assistantMark"><Sparkles /></span><div><h1>人才决策助手</h1><p>输入人才要求或岗位名称，系统将实时展示理解、检索、评估与报告过程</p></div></div>

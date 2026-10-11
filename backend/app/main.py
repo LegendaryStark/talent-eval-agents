@@ -7,8 +7,10 @@ from starlette.requests import Request
 
 from app.api import router
 from app.config import get_settings
+from app.database import SessionLocal
 from app.logging_config import configure_logging
 from app.talent_run_api import router as talent_run_router
+from app.talent_run_history import SqlTalentRunHistoryStore
 from app.talent_run_stream import TalentRunManager
 
 
@@ -19,7 +21,9 @@ logger = logging.getLogger(__name__)
 
 def create_app(*, talent_run_manager: TalentRunManager | None = None) -> FastAPI:
     app = FastAPI(title="人才文档解析 API", version="0.1.0")
-    app.state.talent_run_manager = talent_run_manager or TalentRunManager()
+    app.state.talent_run_manager = talent_run_manager or TalentRunManager(
+        record_store=SqlTalentRunHistoryStore(SessionLocal)
+    )
     app.add_middleware(
         CORSMiddleware,
         allow_origins=get_settings().cors_origins.split(","),

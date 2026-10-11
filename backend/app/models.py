@@ -2,7 +2,7 @@ from datetime import date, datetime
 from enum import StrEnum
 from uuid import UUID, uuid4
 
-from sqlalchemy import BigInteger, Boolean, Date, DateTime, Enum, Float, ForeignKey, Integer, JSON, String, Text, func
+from sqlalchemy import BigInteger, Boolean, Date, DateTime, Enum, Float, ForeignKey, Integer, JSON, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -91,6 +91,45 @@ class ToolCallAudit(Base):
     duration_ms: Mapped[float] = mapped_column(Float)
     error_code: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class TalentRunRecord(Base):
+    __tablename__ = "talent_runs"
+
+    run_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    message: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    report: Mapped[str | None] = mapped_column(Text)
+    citations: Mapped[list[dict]] = mapped_column(JSON, default=list)
+    trace_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    error_message: Mapped[str | None] = mapped_column(Text)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class TalentRunStepRecord(Base):
+    __tablename__ = "talent_run_steps"
+    __table_args__ = (UniqueConstraint("run_id", "step_id", name="uq_talent_run_step"),)
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("talent_runs.run_id", ondelete="CASCADE"),
+        index=True,
+    )
+    step_id: Mapped[str] = mapped_column(String(64))
+    position: Mapped[int] = mapped_column(Integer)
+    title: Mapped[str] = mapped_column(String(255))
+    kind: Mapped[str | None] = mapped_column(String(32))
+    status: Mapped[str] = mapped_column(String(32))
+    completed: Mapped[int | None] = mapped_column(Integer)
+    total: Mapped[int | None] = mapped_column(Integer)
+    summary: Mapped[str | None] = mapped_column(Text)
+    output: Mapped[dict] = mapped_column(JSON, default=dict)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    active_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    duration_ms: Mapped[int | None] = mapped_column(BigInteger)
 
 
 class KnowledgeBase(Base):

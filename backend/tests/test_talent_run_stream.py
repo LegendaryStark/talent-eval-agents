@@ -29,6 +29,7 @@ class StreamingState(TypedDict, total=False):
     evidence_items: list[dict[str, Any]]
     ranking: list[str]
     report: str
+    errors: list[str]
 
 
 def _streaming_graph(*, require_job_selection: bool = False, slow: bool = False):
@@ -130,6 +131,22 @@ def _manager(graph=None) -> TalentRunManager:
     )
 
 
+def _capacity_exceeded_graph():
+    builder = StateGraph(StreamingState)
+
+    def prepare_work_items(_: StreamingState) -> dict[str, Any]:
+        return {
+            "required_work_items": 30,
+            "status": "capacity_exceeded",
+            "errors": ["评估任务数 30 超过本次上限 24"],
+        }
+
+    builder.add_node("prepare_work_items", prepare_work_items)
+    builder.add_edge(START, "prepare_work_items")
+    builder.add_edge("prepare_work_items", END)
+    return builder.compile()
+
+
 async def _wait_for_status(
     manager: TalentRunManager,
     run_id: str,
@@ -167,6 +184,21 @@ async def test_run_projects_compiled_graph_output_instead_of_fixture_report():
     assert "林晓" not in report.data["markdown"]
     assert [event.sequence for event in events] == list(range(1, len(events) + 1))
     assert events[-1].type == "run.completed"
+
+
+@pytest.mark.anyio
+async def test_capacity_exceeded_marks_run_and_active_step_failed():
+    manager = _manager(_capacity_exceeded_graph())
+
+    run = await manager.create_run("评估 AI 应用工程师候选人")
+    await _wait_for_status(manager, run.run_id, RunStatus.FAILED)
+
+    events = manager.events_since(run.run_id, cursor=0)
+    assert events[-1].type == "run.failed"
+    assert events[-1].data == {
+        "message": "评估任务数 30 超过本次上限 24",
+        "graph_status": "capacity_exceeded",
+    }
 
 
 @pytest.mark.anyio

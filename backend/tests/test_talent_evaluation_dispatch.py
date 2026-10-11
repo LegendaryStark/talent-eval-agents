@@ -300,6 +300,9 @@ def test_structured_dimension_generator_sends_request_and_query_plan_to_model():
     assert "query_plan" in model.messages[1][1]
     assert "review_feedback" not in model.messages[1][1]
     assert "hard_conditions" in model.messages[0][1]
+    assert "一般不超过 4 个" in model.messages[0][1]
+    assert "同一主题的多条要求合并为一个维度" in model.messages[0][1]
+    assert "retrieval_hints" in model.messages[0][1]
 
 
 def test_query_plan_candidate_provider_uses_only_trusted_runtime_context():
