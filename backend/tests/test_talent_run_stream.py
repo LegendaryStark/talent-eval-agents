@@ -187,6 +187,42 @@ async def test_run_projects_compiled_graph_output_instead_of_fixture_report():
 
 
 @pytest.mark.anyio
+async def test_conversation_update_is_projected_as_a_public_run_event():
+    builder = StateGraph(dict)
+    builder.add_node(
+        "interpret_input",
+        lambda state: {
+            "conversation_title": "3 年以上经验人才",
+            "revision_action": "update",
+            "revision_summary": "工作年限改为 3 年",
+            "status": "completed",
+        },
+    )
+    builder.add_edge(START, "interpret_input")
+    builder.add_edge("interpret_input", END)
+    manager = _manager(builder.compile())
+
+    run = await manager.create_run("工作年限改成 3 年以上")
+    await _wait_for_status(manager, run.run_id, RunStatus.COMPLETED)
+
+    title_event = next(
+        item
+        for item in manager.events_since(run.run_id, 0)
+        if item.type == "conversation.updated"
+    )
+    revision_event = next(
+        item
+        for item in manager.events_since(run.run_id, 0)
+        if item.type == "requirement.revised"
+    )
+    assert title_event.data == {"title": "3 年以上经验人才"}
+    assert revision_event.data == {
+        "action": "update",
+        "summary": "工作年限改为 3 年",
+    }
+
+
+@pytest.mark.anyio
 async def test_capacity_exceeded_marks_run_and_active_step_failed():
     manager = _manager(_capacity_exceeded_graph())
 
@@ -199,6 +235,26 @@ async def test_capacity_exceeded_marks_run_and_active_step_failed():
         "message": "评估任务数 30 超过本次上限 24",
         "graph_status": "capacity_exceeded",
     }
+
+
+@pytest.mark.anyio
+async def test_two_new_turns_continue_numbering_after_process_restart():
+    class ExistingHistory:
+        last_turn = 4
+
+        def next_turn_no(self, conversation_id):
+            return self.last_turn + 1
+
+        def record(self, event):
+            if event.type == "run.started":
+                self.last_turn = event.data["turn_no"]
+
+    manager = TalentRunManager(graph=_streaming_graph(), record_store=ExistingHistory())
+    fifth = await manager.create_run("增加经验要求", conversation_id="existing")
+    await _wait_for_status(manager, fifth.run_id, RunStatus.COMPLETED)
+    sixth = await manager.create_run("修改年限要求", conversation_id="existing")
+    await _wait_for_status(manager, sixth.run_id, RunStatus.COMPLETED)
+    assert [fifth.turn_no, sixth.turn_no] == [5, 6]
 
 
 @pytest.mark.anyio

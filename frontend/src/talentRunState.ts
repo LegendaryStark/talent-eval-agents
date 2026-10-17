@@ -39,8 +39,25 @@ export type Interrupt = {
   options: { value: string; label: string }[];
 };
 
+export type ConversationTurn = {
+  runId: string;
+  turnNo: number;
+  message: string;
+  resolvedRequestText: string;
+  revisionAction: string;
+  revisionSummary: string;
+  status: RunView["status"];
+  steps: RunStep[];
+  report: string;
+  citations: Citation[];
+  traceId: string;
+  error: string;
+};
+
 export type RunView = {
   runId: string;
+  conversationId: string;
+  turnNo: number;
   lastSequence: number;
   status: "idle" | "running" | "waiting_input" | "completed" | "cancelled" | "failed";
   steps: RunStep[];
@@ -49,10 +66,16 @@ export type RunView = {
   citations: Citation[];
   traceId: string;
   error: string;
+  conversationTitle: string;
+  revisionAction: string;
+  revisionSummary: string;
+  conversationTurns: ConversationTurn[];
 };
 
 export type RunHistoryDetail = {
   run_id: string;
+  conversation_id: string;
+  turn_no: number;
   message: string;
   status: RunView["status"];
   report: string;
@@ -71,10 +94,23 @@ export type RunHistoryDetail = {
     output?: Record<string, unknown>;
     duration_ms?: number;
   }>;
+  conversation_turns: Array<{
+    run_id: string;
+    turn_no: number;
+    message: string;
+    status: RunView["status"];
+    report: string;
+    citations: Citation[];
+    trace_id: string;
+    error?: string;
+    steps: RunHistoryDetail["steps"];
+  }>;
 };
 
 export const initialRunView: RunView = {
   runId: "",
+  conversationId: "",
+  turnNo: 0,
   lastSequence: 0,
   status: "idle",
   steps: [],
@@ -83,31 +119,64 @@ export const initialRunView: RunView = {
   citations: [],
   traceId: "",
   error: "",
+  conversationTitle: "",
+  revisionAction: "",
+  revisionSummary: "",
+  conversationTurns: [],
 };
+
+function restoreSteps(steps: RunHistoryDetail["steps"]): RunStep[] {
+  return [...steps]
+    .sort((left, right) => left.position - right.position)
+    .map((step) => ({
+      stepId: step.step_id,
+      title: step.title,
+      kind: step.kind,
+      status: step.status,
+      completed: step.completed,
+      total: step.total,
+      summary: step.summary,
+      output: step.output,
+      durationMs: step.duration_ms,
+    }));
+}
+
+export function defaultExpandedRunIds(
+  turns: Array<Pick<ConversationTurn, "runId">>,
+): string[] {
+  return turns.length > 0 ? [turns[turns.length - 1].runId] : [];
+}
 
 export function historyDetailToRunView(detail: RunHistoryDetail): RunView {
   return {
     runId: detail.run_id,
+    conversationId: detail.conversation_id,
+    turnNo: detail.turn_no,
     lastSequence: 0,
     status: detail.status,
-    steps: [...detail.steps]
-      .sort((left, right) => left.position - right.position)
-      .map((step) => ({
-        stepId: step.step_id,
-        title: step.title,
-        kind: step.kind,
-        status: step.status,
-        completed: step.completed,
-        total: step.total,
-        summary: step.summary,
-        output: step.output,
-        durationMs: step.duration_ms,
-      })),
+    steps: restoreSteps(detail.steps),
     interrupt: null,
     report: detail.report,
     citations: detail.citations,
     traceId: detail.trace_id,
     error: detail.error || "",
+    conversationTitle: "",
+    revisionAction: "",
+    revisionSummary: "",
+    conversationTurns: detail.conversation_turns.map((turn) => ({
+      runId: turn.run_id,
+      turnNo: turn.turn_no,
+      message: turn.message,
+      resolvedRequestText: "",
+      revisionAction: "",
+      revisionSummary: "",
+      status: turn.status,
+      steps: restoreSteps(turn.steps),
+      report: turn.report,
+      citations: turn.citations,
+      traceId: turn.trace_id,
+      error: turn.error || "",
+    })),
   };
 }
 
@@ -199,6 +268,25 @@ function updateStep(state: RunView, event: RunEvent): RunStep[] {
   return state.steps.map((step) => (step.stepId === stepId ? { ...step, ...next } : step));
 }
 
+function snapshotCurrentTurn(
+  state: RunView,
+  status: ConversationTurn["status"],
+): ConversationTurn[] {
+  return state.conversationTurns.map((turn) =>
+    turn.runId === state.runId
+      ? {
+          ...turn,
+          status,
+          steps: state.steps,
+          report: state.report,
+          citations: state.citations,
+          traceId: state.traceId,
+          error: state.error,
+        }
+      : turn,
+  );
+}
+
 export function reduceRunEvent(state: RunView, event: RunEvent): RunView {
   if (event.sequence <= state.lastSequence) return state;
   const base = {
@@ -207,7 +295,52 @@ export function reduceRunEvent(state: RunView, event: RunEvent): RunView {
     lastSequence: event.sequence,
   };
 
-  if (event.type === "run.started") return { ...base, status: "running" };
+  if (event.type === "run.started") {
+    const turnNo = number(event.data.turn_no) || 0;
+    const turn: ConversationTurn = {
+      runId: event.run_id,
+      turnNo,
+      message: text(event.data.message),
+      resolvedRequestText: "",
+      revisionAction: "",
+      revisionSummary: "",
+      status: "running",
+      steps: [],
+      report: "",
+      citations: [],
+      traceId: "",
+      error: "",
+    };
+    const priorTurns = base.conversationTurns.filter(
+      (item) => item.runId !== event.run_id,
+    );
+    return {
+      ...base,
+      status: "running",
+      conversationId: text(event.data.conversation_id),
+      turnNo,
+      conversationTurns: [...priorTurns, turn].sort(
+        (left, right) => left.turnNo - right.turnNo,
+      ),
+    };
+  }
+  if (event.type === "conversation.updated") {
+    return { ...base, conversationTitle: text(event.data.title) };
+  }
+  if (event.type === "requirement.revised") {
+    const revisionAction = text(event.data.action);
+    const revisionSummary = text(event.data.summary);
+    return {
+      ...base,
+      revisionAction,
+      revisionSummary,
+      conversationTurns: base.conversationTurns.map((turn) =>
+        turn.runId === event.run_id
+          ? { ...turn, revisionAction, revisionSummary }
+          : turn,
+      ),
+    };
+  }
   if (event.type.startsWith("step.")) {
     return { ...base, status: "running", steps: updateStep(base, event) };
   }
@@ -242,23 +375,35 @@ export function reduceRunEvent(state: RunView, event: RunEvent): RunView {
     };
   }
   if (event.type === "run.completed") {
-    return { ...base, status: "completed", interrupt: null };
+    const completed = { ...base, status: "completed" as const, interrupt: null };
+    return {
+      ...completed,
+      conversationTurns: snapshotCurrentTurn(completed, "completed"),
+    };
   }
   if (event.type === "run.cancelled") {
-    return {
+    const cancelled = {
       ...base,
-      status: "cancelled",
+      status: "cancelled" as const,
       interrupt: null,
       steps: freezeRunningSteps(base.steps, event.timestamp, "cancelled"),
     };
+    return {
+      ...cancelled,
+      conversationTurns: snapshotCurrentTurn(cancelled, "cancelled"),
+    };
   }
   if (event.type === "run.failed") {
-    return {
+    const failed = {
       ...base,
-      status: "failed",
+      status: "failed" as const,
       interrupt: null,
       steps: freezeRunningSteps(base.steps, event.timestamp, "failed"),
       error: text(event.data.message),
+    };
+    return {
+      ...failed,
+      conversationTurns: snapshotCurrentTurn(failed, "failed"),
     };
   }
   return base;

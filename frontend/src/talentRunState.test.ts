@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  defaultExpandedRunIds,
   getComposerPolicy,
   historyDetailToRunView,
   initialRunView,
@@ -200,12 +201,84 @@ describe("reduceRunEvent", () => {
     expect(done.status).toBe("completed");
     expect(done.interrupt).toBeNull();
   });
+
+  it("stores the conversation title and requirement revision events", () => {
+    const started = reduceRunEvent(
+      initialRunView,
+      event(1, "run.started", {
+        message: "再增加 Agent 评测经验",
+        conversation_id: "conversation-1",
+        turn_no: 2,
+      }),
+    );
+    const titled = reduceRunEvent(
+      started,
+      event(2, "conversation.updated", { title: "上海 AI 人才筛选" }),
+    );
+    const revised = reduceRunEvent(
+      titled,
+      event(3, "requirement.revised", {
+        action: "add",
+        summary: "增加 Agent 评测经验",
+      }),
+    );
+
+    expect(revised).toMatchObject({
+      conversationId: "conversation-1",
+      turnNo: 2,
+      conversationTitle: "上海 AI 人才筛选",
+      revisionAction: "add",
+      revisionSummary: "增加 Agent 评测经验",
+    });
+  });
+
+  it("copies the completed run output into its conversation turn", () => {
+    const started = reduceRunEvent(
+      initialRunView,
+      event(1, "run.started", {
+        message: "筛选 AI 应用工程师",
+        conversation_id: "conversation-1",
+        turn_no: 1,
+      }),
+    );
+    const step = reduceRunEvent(
+      started,
+      event(2, "step.completed", {
+        step_id: "understand_request",
+        title: "理解人才要求",
+        summary: "已完成解析",
+      }),
+    );
+    const report = reduceRunEvent(
+      step,
+      event(3, "report.completed", {
+        markdown: "# 首轮报告",
+        citations: [{ ref: "E1", quote: "证据" }],
+        trace_id: "trace-1",
+      }),
+    );
+    const done = reduceRunEvent(report, event(4, "run.completed", {}));
+
+    expect(done.conversationTurns[0]).toMatchObject({
+      runId: "run-1",
+      status: "completed",
+      report: "# 首轮报告",
+      traceId: "trace-1",
+    });
+    expect(done.conversationTurns[0].steps[0]).toMatchObject({
+      stepId: "understand_request",
+      status: "completed",
+    });
+    expect(done.conversationTurns[0].citations[0].ref).toBe("E1");
+  });
 });
 
 describe("historyDetailToRunView", () => {
   it("restores persisted steps report and citations without replaying SSE", () => {
     const view = historyDetailToRunView({
       run_id: "saved-run",
+      conversation_id: "conversation-1",
+      turn_no: 2,
       message: "筛选有 Agent 评测经验的候选人",
       status: "completed",
       report: "# 候选人评估报告",
@@ -225,6 +298,40 @@ describe("historyDetailToRunView", () => {
           duration_ms: 42,
         },
       ],
+      conversation_turns: [
+        {
+          run_id: "first-run",
+          turn_no: 1,
+          message: "筛选 5 年以上经验的候选人",
+          status: "completed",
+          report: "# 首轮报告",
+          citations: [{ ref: "E2", quote: "首轮证据" }],
+          trace_id: "trace-first",
+          error: "",
+          steps: [
+            {
+              step_id: "understand_request",
+              position: 1,
+              title: "理解人才要求",
+              status: "completed",
+              summary: "已完成解析",
+              output: {},
+              duration_ms: 18,
+            },
+          ],
+        },
+        {
+          run_id: "saved-run",
+          turn_no: 2,
+          message: "再增加 Agent 评测经验",
+          status: "completed",
+          report: "# 候选人评估报告",
+          citations: [{ ref: "E1", quote: "证据原文" }],
+          trace_id: "trace-1",
+          error: "",
+          steps: [],
+        },
+      ],
     });
 
     expect(view).toMatchObject({
@@ -232,7 +339,11 @@ describe("historyDetailToRunView", () => {
       status: "completed",
       report: "# 候选人评估报告",
       traceId: "trace-1",
+      conversationId: "conversation-1",
+      turnNo: 2,
+      revisionAction: "",
     });
+    expect(view.conversationTurns).toHaveLength(2);
     expect(view.steps[0]).toMatchObject({
       stepId: "filter_candidates",
       status: "completed",
@@ -240,5 +351,22 @@ describe("historyDetailToRunView", () => {
       output: { candidate_count: 1 },
     });
     expect(view.citations[0].ref).toBe("E1");
+    expect(view.conversationTurns[0]).toMatchObject({
+      report: "# 首轮报告",
+      traceId: "trace-first",
+    });
+    expect(view.conversationTurns[0].steps[0]).toMatchObject({
+      stepId: "understand_request",
+      durationMs: 18,
+    });
+  });
+
+  it("expands only the latest conversation turn by default", () => {
+    expect(defaultExpandedRunIds([
+      { runId: "run-1" },
+      { runId: "run-2" },
+      { runId: "run-3" },
+    ])).toEqual(["run-3"]);
+    expect(defaultExpandedRunIds([])).toEqual([]);
   });
 });

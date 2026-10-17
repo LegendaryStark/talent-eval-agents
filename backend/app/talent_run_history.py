@@ -6,7 +6,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.orm import sessionmaker
 
-from app.models import TalentRunRecord, TalentRunStepRecord
+from app.models import TalentConversationRecord, TalentRunRecord, TalentRunStepRecord
 
 
 def _timestamp(value: str) -> datetime:
@@ -36,9 +36,12 @@ class SqlTalentRunHistoryStore:
         with self._session_factory() as session:
             run = session.get(TalentRunRecord, event.run_id)
             if event.type == "run.started":
+                conversation_id = str(event.data.get("conversation_id") or event.run_id)
                 if run is None:
                     run = TalentRunRecord(
                         run_id=event.run_id,
+                        conversation_id=conversation_id,
+                        turn_no=int(event.data.get("turn_no") or 1),
                         message=str(event.data.get("message", "")),
                         status="running",
                         citations=[],
@@ -49,6 +52,21 @@ class SqlTalentRunHistoryStore:
                 else:
                     run.status = "running"
                     run.updated_at = occurred_at
+                conversation = session.get(TalentConversationRecord, conversation_id)
+                if conversation is None:
+                    conversation = TalentConversationRecord(
+                        conversation_id=conversation_id,
+                        title="新会话",
+                        status="running",
+                        latest_run_id=event.run_id,
+                        created_at=occurred_at,
+                        updated_at=occurred_at,
+                    )
+                    session.add(conversation)
+                else:
+                    conversation.status = "running"
+                    conversation.latest_run_id = event.run_id
+                    conversation.updated_at = occurred_at
                 session.commit()
                 return
             if run is None:
@@ -56,6 +74,14 @@ class SqlTalentRunHistoryStore:
 
             if event.type.startswith("step."):
                 self._record_step(session, run, event, occurred_at)
+            elif event.type == "conversation.updated":
+                title = str(event.data.get("title", "")).strip()
+                conversation = session.get(
+                    TalentConversationRecord,
+                    run.conversation_id,
+                )
+                if conversation is not None and title:
+                    conversation.title = title
             elif event.type == "hitl.required":
                 run.status = "waiting_input"
                 self._set_active_step_status(session, run.run_id, "paused", occurred_at)
@@ -79,6 +105,10 @@ class SqlTalentRunHistoryStore:
                         occurred_at,
                     )
             run.updated_at = occurred_at
+            conversation = session.get(TalentConversationRecord, run.conversation_id)
+            if conversation is not None:
+                conversation.status = run.status
+                conversation.updated_at = occurred_at
             session.commit()
 
     def _record_step(
@@ -174,23 +204,76 @@ class SqlTalentRunHistoryStore:
             ).all()
             return [self._run_summary(item) for item in runs]
 
+    def list_conversations(
+        self,
+        *,
+        status: str | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        with self._session_factory() as session:
+            statement = select(TalentConversationRecord)
+            if status:
+                statement = statement.where(TalentConversationRecord.status == status)
+            conversations = session.scalars(
+                statement.order_by(TalentConversationRecord.updated_at.desc()).limit(limit)
+            ).all()
+            return [
+                {
+                    "conversation_id": item.conversation_id,
+                    "title": item.title,
+                    "status": item.status,
+                    "updated_at": _iso(item.updated_at),
+                    "latest_run_id": item.latest_run_id or "",
+                }
+                for item in conversations
+            ]
+
+    def next_turn_no(self, conversation_id: str) -> int:
+        with self._session_factory() as session:
+            latest = session.scalar(
+                select(func.max(TalentRunRecord.turn_no)).where(
+                    TalentRunRecord.conversation_id == conversation_id
+                )
+            )
+            return int(latest or 0) + 1
+
     def get_run(self, run_id: str) -> dict[str, Any] | None:
         with self._session_factory() as session:
             run = session.get(TalentRunRecord, run_id)
             if run is None:
                 return None
-            steps = session.scalars(
-                select(TalentRunStepRecord)
-                .where(TalentRunStepRecord.run_id == run_id)
-                .order_by(TalentRunStepRecord.position)
+            conversation_runs = session.scalars(
+                select(TalentRunRecord)
+                .where(
+                    TalentRunRecord.conversation_id == run.conversation_id,
+                    TalentRunRecord.turn_no <= run.turn_no,
+                )
+                .order_by(TalentRunRecord.turn_no)
             ).all()
+            run_ids = [item.run_id for item in conversation_runs]
+            conversation_steps = session.scalars(
+                select(TalentRunStepRecord)
+                .where(TalentRunStepRecord.run_id.in_(run_ids))
+                .order_by(TalentRunStepRecord.run_id, TalentRunStepRecord.position)
+            ).all()
+            steps_by_run: dict[str, list[TalentRunStepRecord]] = {
+                item.run_id: [] for item in conversation_runs
+            }
+            for step in conversation_steps:
+                steps_by_run[step.run_id].append(step)
             return {
                 **self._run_summary(run),
                 "report": run.report or "",
                 "citations": list(run.citations or []),
                 "trace_id": run.trace_id or "",
                 "error": run.error_message or "",
-                "steps": [self._step_detail(step) for step in steps],
+                "steps": [
+                    self._step_detail(step) for step in steps_by_run[run.run_id]
+                ],
+                "conversation_turns": [
+                    self._conversation_turn(item, steps_by_run[item.run_id])
+                    for item in conversation_runs
+                ],
             }
 
     @staticmethod
@@ -198,11 +281,30 @@ class SqlTalentRunHistoryStore:
         duration_ms = _duration_ms(run.started_at, run.completed_at) if run.completed_at else None
         return {
             "run_id": run.run_id,
+            "conversation_id": run.conversation_id,
+            "turn_no": run.turn_no,
             "message": run.message,
             "status": run.status,
             "started_at": _iso(run.started_at),
             "completed_at": _iso(run.completed_at),
             "duration_ms": duration_ms,
+        }
+
+    @staticmethod
+    def _conversation_turn(
+        run: TalentRunRecord,
+        steps: list[TalentRunStepRecord],
+    ) -> dict[str, Any]:
+        return {
+            "run_id": run.run_id,
+            "turn_no": run.turn_no,
+            "message": run.message,
+            "status": run.status,
+            "report": run.report or "",
+            "citations": list(run.citations or []),
+            "trace_id": run.trace_id or "",
+            "error": run.error_message or "",
+            "steps": [SqlTalentRunHistoryStore._step_detail(step) for step in steps],
         }
 
     @staticmethod

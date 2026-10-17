@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from langchain.messages import HumanMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
@@ -211,19 +212,27 @@ def test_model_interpreter_prompt_distinguishes_region_from_current_position(mon
         def invoke(self, messages):
             captured["messages"] = messages
             return {
-                "input_mode": "detailed_requirement",
-                "filters": [{"field": "region", "operator": "eq", "value": "上海"}],
-                "semantic_requirements": [],
-                "evaluation_preferences": [],
-                "clarifications": [],
+                "draft": {
+                    "input_mode": "detailed_requirement",
+                    "filters": [{"field": "region", "operator": "eq", "value": "上海"}],
+                    "semantic_requirements": [],
+                    "evaluation_preferences": [],
+                    "clarifications": [],
+                },
+                "revision_action": "initial",
+                "revision_summary": "建立初始要求",
+                "conversation_title": "上海人才筛选",
             }
 
     monkeypatch.setattr(module, "get_chat_model", lambda temperature=0: CapturingModel())
 
-    result = module.model_request_interpreter("筛选地区在上海的候选人")
+    result = module.model_request_interpreter(
+        [HumanMessage(content="筛选地区在上海的候选人")],
+        {},
+    )
 
     system_prompt = captured["messages"][0][1]
     assert "region: 工作地区" in system_prompt
     assert "current_position: 当前岗位" in system_prompt
     assert "地名只能映射为 region" in system_prompt
-    assert result.filters[0].field.value == "region"
+    assert result.draft.filters[0].field.value == "region"

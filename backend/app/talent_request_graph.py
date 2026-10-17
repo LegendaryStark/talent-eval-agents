@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import inspect
 from operator import add
 from typing import Annotated, Any, Literal
 
+from langchain.messages import AnyMessage, HumanMessage
 from langgraph.graph import END, START, StateGraph
+from langgraph.graph.message import add_messages
 from langgraph.runtime import Runtime
 from langgraph.types import interrupt
 from pydantic import BaseModel, Field, ValidationError
@@ -65,11 +68,25 @@ class TalentRequestDraft(BaseModel):
     clarifications: list[Clarification] = Field(default_factory=list)
 
 
-class TalentRequestInput(TypedDict):
+class TalentRequestRevision(BaseModel):
+    draft: TalentRequestDraft
+    revision_action: Literal["initial", "add", "update", "remove"] = "initial"
+    revision_summary: str = "建立初始人才要求"
+
+
+class TalentRequestUnderstanding(TalentRequestRevision):
+    conversation_title: str = Field(min_length=1, max_length=80)
+
+
+class TalentRequestInput(TypedDict, total=False):
+    messages: Annotated[list[AnyMessage], add_messages]
     request_text: str
+    talent_request: dict[str, Any]
+    conversation_title: str
 
 
 class TalentRequestOutput(TypedDict):
+    messages: Annotated[list[AnyMessage], add_messages]
     status: RequestStatus
     input_mode: RequestInputMode
     job_matches: list[JobMatch]
@@ -81,9 +98,13 @@ class TalentRequestOutput(TypedDict):
     plan_version: int
     clarifications: list[dict[str, str]]
     errors: list[str]
+    conversation_title: str
+    revision_action: str
+    revision_summary: str
 
 
 class TalentRequestState(TypedDict, total=False):
+    messages: Annotated[list[AnyMessage], add_messages]
     request_text: str
     input_mode: RequestInputMode
     draft: dict[str, Any]
@@ -97,9 +118,12 @@ class TalentRequestState(TypedDict, total=False):
     clarifications: list[dict[str, str]]
     status: RequestStatus
     errors: list[str]
+    conversation_title: str
+    revision_action: str
+    revision_summary: str
 
 
-RequestInterpreter = Callable[[str, JobMatch | None], TalentRequestDraft]
+RequestInterpreter = Callable[..., TalentRequestUnderstanding | TalentRequestDraft]
 JobLookup = Callable[[str, DecisionContext], list[JobMatch]]
 CandidateFilter = Callable[[list[FilterCondition], DecisionContext], list[str]]
 
@@ -109,14 +133,16 @@ def _receive_request(state: TalentRequestState, runtime: Runtime[DecisionContext
         raise ValueError("Runtime Context 中的 tenant_id 不能为空")
     if not runtime.context.permission_scopes:
         raise ValueError("Runtime Context 中的 permission_scopes 不能为空")
-    request_text = state["request_text"].strip()
+    messages = list(state.get("messages", []))
+    request_text = str(state.get("request_text", "")).strip()
+    if messages:
+        request_text = str(messages[-1].content).strip()
     if not request_text:
         raise ValueError("request_text 不能为空")
-    return {
+    update: dict[str, Any] = {
         "request_text": request_text,
         "job_matches": [],
         "selected_job": None,
-        "talent_request": {},
         "query_plan": {},
         "candidate_ids": [],
         "condition_revisions": [],
@@ -125,15 +151,45 @@ def _receive_request(state: TalentRequestState, runtime: Runtime[DecisionContext
         "status": "received",
         "errors": [],
     }
+    if not messages:
+        update["messages"] = [HumanMessage(content=request_text)]
+    return update
+
+
+def _call_request_interpreter(
+    interpreter: RequestInterpreter,
+    state: TalentRequestState,
+    selected_job: JobMatch | None,
+) -> TalentRequestUnderstanding:
+    parameters = inspect.signature(interpreter).parameters
+    if len(parameters) <= 2:
+        legacy = interpreter(state["request_text"], selected_job)
+        if isinstance(legacy, TalentRequestUnderstanding):
+            return legacy
+        return TalentRequestUnderstanding(
+            draft=TalentRequestDraft.model_validate(legacy),
+            conversation_title=state.get("conversation_title") or state["request_text"][:30],
+        )
+    result = interpreter(
+        list(state.get("messages", [])),
+        dict(state.get("talent_request", {})),
+        selected_job,
+        state.get("conversation_title", ""),
+    )
+    return TalentRequestUnderstanding.model_validate(result)
 
 
 def _interpret_input(request_interpreter: RequestInterpreter):
     def interpret_input(state: TalentRequestState) -> dict[str, Any]:
-        draft = request_interpreter(state["request_text"], None)
+        understanding = _call_request_interpreter(request_interpreter, state, None)
+        draft = understanding.draft
         return {
             "draft": draft.model_dump(mode="json"),
             "input_mode": draft.input_mode,
             "status": "request_understood",
+            "conversation_title": state.get("conversation_title") or understanding.conversation_title,
+            "revision_action": understanding.revision_action,
+            "revision_summary": understanding.revision_summary,
         }
 
     return interpret_input
@@ -209,10 +265,16 @@ def _route_job_confirmation(state: TalentRequestState) -> str:
 
 def _compile_selected_job(request_interpreter: RequestInterpreter):
     def compile_selected_job(state: TalentRequestState) -> dict[str, Any]:
-        draft = request_interpreter(state["request_text"], state["selected_job"])
+        understanding = _call_request_interpreter(
+            request_interpreter,
+            state,
+            state["selected_job"],
+        )
+        draft = understanding.draft
         return {
             "draft": draft.model_dump(mode="json"),
             "input_mode": "job_name",
+            "conversation_title": state.get("conversation_title") or understanding.conversation_title,
         }
 
     return compile_selected_job
@@ -416,6 +478,7 @@ def _resolve_requirements():
         }
         return {
             "request_text": revision_text,
+            "messages": [HumanMessage(content=revision_text)],
             "selected_job": None,
             "job_matches": [],
             "candidate_ids": [],
@@ -656,7 +719,11 @@ def build_talent_request_graph(
     return builder.compile(checkpointer=checkpointer) if checkpointer is not None else builder.compile()
 
 
-MODEL_SYSTEM_PROMPT = """你是人才评估任务编译器。输出 TalentRequestDraft。
+MODEL_SYSTEM_PROMPT = """你是人才评估任务编译器。按照给定 Schema 输出结构化结果。
+结合完整消息历史和 previous_request，输出本轮修订后的完整 TalentRequestDraft。
+首轮 revision_action 为 initial，conversation_title 为空时生成不超过 20 个中文字的标题。
+已有 conversation_title 时不生成标题，后续轮根据最新消息在 add、update、remove 中选择，保留未被修改的既有条件。
+用 revision_summary 简要说明变化。
 如果输入只有岗位名称或岗位简称，input_mode 使用 job_name，只填写 job_query，不根据岗位名称猜测条件。
 如果输入包含地区、年限、职级、技能、项目经验或偏好，input_mode 使用 detailed_requirement。
 结构化硬条件只能写入 filters，字段定义与允许的操作符如下：
@@ -667,24 +734,42 @@ MODEL_SYSTEM_PROMPT = """你是人才评估任务编译器。输出 TalentReques
 当输入中包含 confirmed_job 时，按照已确认岗位 JD 编译条件，并保留用户补充要求。"""
 
 
-def model_request_interpreter(request_text: str, selected_job: JobMatch | None = None) -> TalentRequestDraft:
+def model_request_interpreter(
+    messages: list[AnyMessage],
+    previous_request: dict[str, Any],
+    selected_job: JobMatch | None = None,
+    conversation_title: str = "",
+) -> TalentRequestUnderstanding:
     model = get_chat_model(temperature=0)
     if model is None:
         raise RuntimeError("任务理解模型未配置，请设置 DASHSCOPE_API_KEY")
-    user_content = request_text
+    history = "\n".join(
+        f"{getattr(message, 'type', 'user')}: {message.content}" for message in messages
+    )
+    user_content = (
+        f"message_history=\n{history}\n"
+        f"previous_request={previous_request}\n"
+        f"conversation_title={conversation_title}"
+    )
     if selected_job is not None:
-        user_content = (
-            f"original_request={request_text}\n"
+        user_content += (
+            "\n"
             f"confirmed_job={selected_job['name']}\n"
             f"job_description={selected_job['content']}"
         )
-    result = model.with_structured_output(TalentRequestDraft, method="function_calling").invoke(
+    result = model.with_structured_output(
+        TalentRequestRevision if conversation_title else TalentRequestUnderstanding,
+        method="function_calling",
+    ).invoke(
         [
             ("system", MODEL_SYSTEM_PROMPT.format(filter_dsl=filter_dsl_catalog())),
             ("user", user_content),
         ]
     )
-    return TalentRequestDraft.model_validate(result)
+    if conversation_title:
+        revision = TalentRequestRevision.model_validate(result)
+        return TalentRequestUnderstanding(**revision.model_dump(), conversation_title=conversation_title)
+    return TalentRequestUnderstanding.model_validate(result)
 
 
 def database_job_lookup(query: str, context: DecisionContext) -> list[JobMatch]:

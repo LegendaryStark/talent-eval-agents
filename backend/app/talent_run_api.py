@@ -12,10 +12,12 @@ from app.talent_run_stream import RunEvent, TalentRunManager
 
 
 router = APIRouter(prefix="/api/runs", tags=["talent-runs"])
+conversation_router = APIRouter(prefix="/api/conversations", tags=["talent-conversations"])
 
 
 class CreateRunInput(BaseModel):
     message: str = Field(min_length=1, max_length=2000)
+    conversation_id: str | None = Field(default=None, min_length=1, max_length=64)
 
 
 class ResumeRunInput(BaseModel):
@@ -44,11 +46,31 @@ async def get_run_history(run_id: str, request: Request):
     return detail
 
 
+@conversation_router.get("")
+async def list_conversations(
+    request: Request,
+    status: str | None = None,
+    limit: int = 20,
+):
+    return _manager(request).list_conversations(
+        status=status,
+        limit=max(1, min(limit, 100)),
+    )
+
+
 @router.post("", status_code=status.HTTP_201_CREATED)
 async def create_run(payload: CreateRunInput, request: Request):
-    run = await _manager(request).create_run(payload.message)
+    try:
+        run = await _manager(request).create_run(
+            payload.message,
+            conversation_id=payload.conversation_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
     return {
         "run_id": run.run_id,
+        "conversation_id": run.conversation_id,
+        "turn_no": run.turn_no,
         "status": run.status,
         "events_url": f"/api/runs/{run.run_id}/events",
     }

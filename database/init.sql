@@ -228,6 +228,8 @@ COMMENT ON TABLE evidence_index_jobs IS 'PostgreSQL 与 Milvus 之间的证据�
 
 CREATE TABLE talent_runs (
     run_id VARCHAR(64) PRIMARY KEY,
+    conversation_id VARCHAR(64) NOT NULL,
+    turn_no INTEGER NOT NULL CHECK (turn_no > 0),
     message TEXT NOT NULL,
     status VARCHAR(32) NOT NULL,
     report TEXT,
@@ -242,6 +244,8 @@ CREATE TABLE talent_runs (
 CREATE INDEX idx_talent_runs_status ON talent_runs (status);
 CREATE INDEX idx_talent_runs_started_at ON talent_runs (started_at DESC);
 CREATE INDEX idx_talent_runs_trace_id ON talent_runs (trace_id);
+CREATE INDEX idx_talent_runs_conversation_turn
+ON talent_runs (conversation_id, turn_no);
 
 CREATE TABLE talent_run_steps (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -267,3 +271,17 @@ ON talent_run_steps (run_id, position);
 
 COMMENT ON TABLE talent_runs IS '人才评估 Run 的最新状态、报告与引用快照';
 COMMENT ON TABLE talent_run_steps IS 'Run 内各业务步骤的最新可见结果';
+
+CREATE TABLE talent_conversations (
+    conversation_id VARCHAR(64) PRIMARY KEY,
+    title VARCHAR(255) NOT NULL,
+    status VARCHAR(32) NOT NULL,
+    latest_run_id VARCHAR(64),
+    created_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX idx_talent_conversations_status_updated
+ON talent_conversations (status, updated_at DESC);
+
+COMMENT ON TABLE talent_conversations IS '前端会话列表的业务投影，不用于恢复 LangGraph State';

@@ -80,6 +80,20 @@ def _history_manager() -> TalentRunManager:
     )
 
 
+def _completed_manager() -> TalentRunManager:
+    builder = StateGraph(dict)
+    builder.add_node("complete", lambda _: {"status": "completed"})
+    builder.add_edge(START, "complete")
+    builder.add_edge("complete", END)
+    return TalentRunManager(
+        graph=builder.compile(checkpointer=InMemorySaver()),
+        context=DecisionContext(
+            tenant_id="course-demo",
+            permission_scopes=("hr_private",),
+        ),
+    )
+
+
 def test_sse_frame_uses_protocol_id_type_and_json_envelope():
     from app.talent_run_api import encode_sse
 
@@ -130,6 +144,32 @@ def test_create_run_returns_stream_location_and_cancel_is_idempotent():
         assert repeated.json()["status"] == "cancelled"
 
 
+def test_follow_up_message_reuses_conversation_and_creates_a_new_run():
+    manager = _completed_manager()
+    app = create_app(talent_run_manager=manager)
+    with TestClient(app) as client:
+        first = client.post("/api/runs", json={"message": "筛选上海地区候选人"})
+        first_body = first.json()
+        for _ in range(100):
+            if manager.get_run(first_body["run_id"]).status == "completed":
+                break
+            time.sleep(0.01)
+
+        second = client.post(
+            "/api/runs",
+            json={
+                "message": "地区要求删除",
+                "conversation_id": first_body["conversation_id"],
+            },
+        )
+
+    second_body = second.json()
+    assert first_body["conversation_id"] == second_body["conversation_id"]
+    assert first_body["run_id"] != second_body["run_id"]
+    assert first_body["turn_no"] == 1
+    assert second_body["turn_no"] == 2
+
+
 def test_resume_rejects_unknown_choice():
     app = create_app(talent_run_manager=_job_selection_manager())
     with TestClient(app) as client:
@@ -173,3 +213,21 @@ def test_history_detail_returns_404_for_unknown_run():
         response = client.get("/api/runs/history/missing")
 
     assert response.status_code == 404
+
+
+def test_conversation_list_supports_status_filter():
+    app = create_app(talent_run_manager=_history_manager())
+
+    with TestClient(app) as client:
+        completed = client.get("/api/conversations?status=completed")
+        running = client.get("/api/conversations?status=running")
+
+    assert completed.status_code == 200
+    assert completed.json()[0] == {
+        "conversation_id": "saved-run",
+        "title": "新会话",
+        "status": "completed",
+        "updated_at": "2026-10-11T01:00:05",
+        "latest_run_id": "saved-run",
+    }
+    assert running.json() == []

@@ -127,6 +127,156 @@ def test_history_limit_keeps_newest_runs_first():
     assert [item["run_id"] for item in history] == ["run-2"]
 
 
+def test_conversation_projection_keeps_title_status_updated_at_and_turn_order():
+    store = _store()
+    events = [
+        RunEvent(
+            event_id="run-1:1",
+            sequence=1,
+            type="run.started",
+            run_id="run-1",
+            timestamp="2026-10-11T01:00:00+00:00",
+            data={
+                "message": "筛选上海地区、5 年以上经验的候选人",
+                "conversation_id": "conversation-1",
+                "turn_no": 1,
+            },
+        ),
+        RunEvent(
+            event_id="run-1:2",
+            sequence=2,
+            type="conversation.updated",
+            run_id="run-1",
+            timestamp="2026-10-11T01:00:01+00:00",
+            data={"title": "上海资深人才筛选"},
+        ),
+        RunEvent(
+            event_id="run-1:3",
+            sequence=3,
+            type="step.started",
+            run_id="run-1",
+            timestamp="2026-10-11T01:00:02+00:00",
+            data={"step_id": "understand_request", "title": "理解人才要求"},
+        ),
+        RunEvent(
+            event_id="run-1:4",
+            sequence=4,
+            type="step.completed",
+            run_id="run-1",
+            timestamp="2026-10-11T01:00:03+00:00",
+            data={
+                "step_id": "understand_request",
+                "title": "理解人才要求",
+                "summary": "已得到首轮要求",
+            },
+        ),
+        RunEvent(
+            event_id="run-1:5",
+            sequence=5,
+            type="report.completed",
+            run_id="run-1",
+            timestamp="2026-10-11T01:00:04+00:00",
+            data={
+                "markdown": "# 首轮报告",
+                "citations": [{"ref": "E1", "quote": "首轮证据"}],
+                "trace_id": "trace-run-1",
+            },
+        ),
+        RunEvent(
+            event_id="run-1:6",
+            sequence=6,
+            type="run.completed",
+            run_id="run-1",
+            timestamp="2026-10-11T01:00:05+00:00",
+            data={"graph_status": "completed"},
+        ),
+        RunEvent(
+            event_id="run-2:1",
+            sequence=1,
+            type="run.started",
+            run_id="run-2",
+            timestamp="2026-10-11T02:00:00+00:00",
+            data={
+                "message": "地区要求删除",
+                "conversation_id": "conversation-1",
+                "turn_no": 2,
+            },
+        ),
+        RunEvent(
+            event_id="run-2:2",
+            sequence=2,
+            type="conversation.updated",
+            run_id="run-2",
+            timestamp="2026-10-11T02:00:01+00:00",
+            data={"title": "上海资深人才筛选"},
+        ),
+        RunEvent(
+            event_id="run-2:3",
+            sequence=3,
+            type="run.completed",
+            run_id="run-2",
+            timestamp="2026-10-11T02:00:02+00:00",
+            data={"graph_status": "completed"},
+        ),
+    ]
+    for event in events:
+        store.record(event)
+
+    detail = store.get_run("run-2")
+    conversations = store.list_conversations(status="completed")
+
+    assert detail is not None
+    assert detail["conversation_id"] == "conversation-1"
+    assert detail["turn_no"] == 2
+    assert detail["conversation_turns"] == [
+        {
+            "run_id": "run-1",
+            "turn_no": 1,
+            "message": "筛选上海地区、5 年以上经验的候选人",
+            "status": "completed",
+            "report": "# 首轮报告",
+            "citations": [{"ref": "E1", "quote": "首轮证据"}],
+            "trace_id": "trace-run-1",
+            "error": "",
+            "steps": [
+                {
+                    "step_id": "understand_request",
+                    "position": 1,
+                    "title": "理解人才要求",
+                    "kind": None,
+                    "status": "completed",
+                    "completed": None,
+                    "total": None,
+                    "summary": "已得到首轮要求",
+                    "output": {},
+                    "started_at": "2026-10-11T01:00:02",
+                    "completed_at": "2026-10-11T01:00:03",
+                    "duration_ms": 1000,
+                }
+            ],
+        },
+        {
+            "run_id": "run-2",
+            "turn_no": 2,
+            "message": "地区要求删除",
+            "status": "completed",
+            "report": "",
+            "citations": [],
+            "trace_id": "",
+            "error": "",
+            "steps": [],
+        },
+    ]
+    assert conversations == [{
+        "conversation_id": "conversation-1",
+        "title": "上海资深人才筛选",
+        "status": "completed",
+        "updated_at": "2026-10-11T02:00:02",
+        "latest_run_id": "run-2",
+    }]
+    assert store.next_turn_no("conversation-1") == 3
+
+
 def test_human_waiting_time_is_excluded_from_step_duration():
     store = _store()
     events = [

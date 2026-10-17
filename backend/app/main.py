@@ -1,4 +1,5 @@
 import logging
+from contextlib import asynccontextmanager
 from time import perf_counter
 
 from fastapi import FastAPI
@@ -9,7 +10,7 @@ from app.api import router
 from app.config import get_settings
 from app.database import SessionLocal
 from app.logging_config import configure_logging
-from app.talent_run_api import router as talent_run_router
+from app.talent_run_api import conversation_router, router as talent_run_router
 from app.talent_run_history import SqlTalentRunHistoryStore
 from app.talent_run_stream import TalentRunManager
 
@@ -20,10 +21,20 @@ logger = logging.getLogger(__name__)
 
 
 def create_app(*, talent_run_manager: TalentRunManager | None = None) -> FastAPI:
-    app = FastAPI(title="人才文档解析 API", version="0.1.0")
-    app.state.talent_run_manager = talent_run_manager or TalentRunManager(
+    manager = talent_run_manager or TalentRunManager(
         record_store=SqlTalentRunHistoryStore(SessionLocal)
     )
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        await manager.startup()
+        try:
+            yield
+        finally:
+            await manager.shutdown()
+
+    app = FastAPI(title="人才文档解析 API", version="0.1.0", lifespan=lifespan)
+    app.state.talent_run_manager = manager
     app.add_middleware(
         CORSMiddleware,
         allow_origins=get_settings().cors_origins.split(","),
@@ -63,6 +74,7 @@ def create_app(*, talent_run_manager: TalentRunManager | None = None) -> FastAPI
 
     app.include_router(router)
     app.include_router(talent_run_router)
+    app.include_router(conversation_router)
     return app
 
 

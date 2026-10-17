@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 from uuid import uuid4
 
-from langgraph.checkpoint.memory import InMemorySaver
+from langchain.messages import HumanMessage
 from langgraph.types import Command
 
+from app.config import get_settings
+from app.talent_checkpoint import PostgresCheckpointRuntime
 from app.talent_decision_graph import DecisionContext
 from app.talent_event_projection import (
     interrupt_payload,
@@ -50,6 +51,8 @@ class RunEvent:
 @dataclass
 class TalentRun:
     run_id: str
+    conversation_id: str
+    turn_no: int
     message: str
     status: RunStatus = RunStatus.RUNNING
     events: list[RunEvent] = field(default_factory=list)
@@ -67,14 +70,6 @@ class TalentRun:
     report_emitted: bool = False
 
 
-def build_default_run_graph():
-    """Build the real integrated decision graph with resumable local state."""
-
-    from app.talent_decision_runtime import build_runtime_decision_graph
-
-    return build_runtime_decision_graph(checkpointer=InMemorySaver())
-
-
 class TalentRunManager:
     """Stream the real decision graph and retain events for the active SSE stream."""
 
@@ -82,13 +77,12 @@ class TalentRunManager:
         self,
         *,
         graph: Any | None = None,
-        graph_factory: Callable[[], Any] = build_default_run_graph,
         context: DecisionContext | None = None,
         max_concurrency: int = 6,
         record_store: Any | None = None,
     ) -> None:
         self._graph = graph
-        self._graph_factory = graph_factory
+        self._checkpoint_runtime: PostgresCheckpointRuntime | None = None
         self._context = context or DecisionContext(
             tenant_id="course-demo",
             permission_scopes=("hr_private",),
@@ -96,21 +90,70 @@ class TalentRunManager:
         self._max_concurrency = max_concurrency
         self._record_store = record_store
         self._runs: dict[str, TalentRun] = {}
+        self._conversation_runs: dict[str, list[str]] = {}
         self._conditions: dict[str, asyncio.Condition] = {}
 
+    async def startup(self) -> None:
+        if self._graph is not None:
+            return
+        from app.talent_decision_runtime import build_runtime_decision_graph
+
+        self._checkpoint_runtime = PostgresCheckpointRuntime(
+            get_settings().database_url
+        )
+        saver = await self._checkpoint_runtime.start()
+        self._graph = build_runtime_decision_graph(checkpointer=saver)
+
+    async def shutdown(self) -> None:
+        if self._checkpoint_runtime is not None:
+            await self._checkpoint_runtime.close()
+            self._checkpoint_runtime = None
+
     def _get_graph(self):
+        """仅供已注入 Graph 的测试与组合代码读取。"""
+
         if self._graph is None:
-            self._graph = self._graph_factory()
+            raise RuntimeError("LangGraph 运行时尚未启动")
         return self._graph
 
-    async def create_run(self, message: str) -> TalentRun:
-        run = TalentRun(run_id=str(uuid4()), message=message.strip())
-        self._runs[run.run_id] = run
-        self._conditions[run.run_id] = asyncio.Condition()
-        self._append(run, "run.started", {"message": run.message})
-        run.task = asyncio.create_task(
-            self._execute(run, {"request_text": run.message})
+    async def create_run(
+        self,
+        message: str,
+        *,
+        conversation_id: str | None = None,
+    ) -> TalentRun:
+        await self.startup()
+        conversation_key = conversation_id or str(uuid4())
+        run_ids = self._conversation_runs.setdefault(conversation_key, [])
+        if run_ids and self.get_run(run_ids[-1]).status not in TERMINAL_STATUSES:
+            raise ValueError("当前会话仍有运行中的任务")
+        run = TalentRun(
+            run_id=str(uuid4()),
+            conversation_id=conversation_key,
+            turn_no=(
+                self._record_store.next_turn_no(conversation_key)
+                if self._record_store is not None
+                else len(run_ids) + 1
+            ),
+            message=message.strip(),
         )
+        self._runs[run.run_id] = run
+        run_ids.append(run.run_id)
+        self._conditions[run.run_id] = asyncio.Condition()
+        self._append(
+            run,
+            "run.started",
+            {
+                "message": run.message,
+                "conversation_id": run.conversation_id,
+                "turn_no": run.turn_no,
+            },
+        )
+        graph_input: dict[str, Any] = {
+            "messages": [HumanMessage(content=run.message)],
+            "request_text": run.message,
+        }
+        run.task = asyncio.create_task(self._execute(run, graph_input))
         return run
 
     def get_run(self, run_id: str) -> TalentRun:
@@ -191,6 +234,16 @@ class TalentRunManager:
             return None
         return self._record_store.get_run(run_id)
 
+    def list_conversations(
+        self,
+        *,
+        status: str | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        if self._record_store is None:
+            return []
+        return self._record_store.list_conversations(status=status, limit=limit)
+
     async def _emit(self, run: TalentRun, event_type: str, data: dict[str, Any]) -> None:
         if run.status == RunStatus.CANCELLED and event_type != "run.cancelled":
             return
@@ -204,13 +257,15 @@ class TalentRunManager:
 
     def _config(self, run: TalentRun) -> dict[str, Any]:
         return {
-            "configurable": {"thread_id": run.run_id},
+            "configurable": {"thread_id": run.conversation_id},
             "max_concurrency": self._max_concurrency,
         }
 
     async def _execute(self, run: TalentRun, graph_input: Any) -> None:
         try:
-            graph = self._get_graph()
+            graph = self._graph
+            if graph is None:
+                raise RuntimeError("LangGraph 运行时未启动")
             async for item in graph.astream(
                 graph_input,
                 self._config(run),
@@ -306,6 +361,22 @@ class TalentRunManager:
                 return True
             if not isinstance(update, dict):
                 continue
+            if node == "interpret_input" and update.get("conversation_title"):
+                await self._emit(
+                    run,
+                    "conversation.updated",
+                    {"title": str(update["conversation_title"])},
+                )
+                action = str(update.get("revision_action", ""))
+                if action in {"add", "update", "remove"}:
+                    await self._emit(
+                        run,
+                        "requirement.revised",
+                        {
+                            "action": action,
+                            "summary": str(update.get("revision_summary", "")),
+                        },
+                    )
             status = update.get("status")
             if isinstance(status, str):
                 run.graph_status = status

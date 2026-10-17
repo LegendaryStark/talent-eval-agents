@@ -12,12 +12,17 @@
 | `database/migrations/007_milvus_evidence_index.sql` | 第 6 课 Milvus 索引任务表的幂等增量迁移 |
 | `database/migrations/012_talent_tools.sql` | 第 12 课岗位 JD 与人才工具调用审计表的幂等增量迁移 |
 | `database/migrations/020_run_history.sql` | 第 20 课 Run 与步骤历史表的幂等增量迁移 |
+| `database/migrations/021_conversation_history.sql` | 第 21 课会话列表投影的幂等增量迁移 |
 | `frontend/` | React 前端 |
 | `docker-compose.yml` | 默认启动 PostgreSQL、MinIO、Redis；`app` profile 启动 backend、worker、frontend |
 
 ## 产品定位
 
-前端是多 Agent 人才评估与推荐系统的统一应用壳层。人才档案模块包含员工花名册、档案资料库和证据召回验收台，评估与推荐模块提供人才要求输入、SSE 运行步骤、并行进度、HITL 选项、条件修订、Markdown 报告、引用抽屉、Run 标识和历史结果回看。后端 Run API 支持创建、事件订阅、人工恢复、幂等取消以及运行历史查询
+前端是多 Agent 人才评估与推荐系统的统一应用壳层。人才档案模块包含员工花名册、档案资料库和证据召回验收台，评估与推荐模块提供多轮人才要求、SSE 修订反馈、运行步骤、HITL、Markdown 报告、证据回查和按状态筛选的会话列表。后端使用 `AsyncPostgresSaver` 保存 Graph State，Run 与会话 API 负责实时事件、人工恢复、幂等取消和历史读模型查询
+
+多轮入口继续使用 `POST /api/runs`，后续请求携带同一 `conversation_id`。父图 `_begin_turn` 返回局部更新，保留消息、当前输入、完整要求和标题，仅清理运行产物。请求子图输入显式声明 `messages`、`request_text`、`talent_request`、`conversation_title`，人工澄清也作为消息返回父图。首次理解生成标题，后续模型使用不含标题字段的修订 Schema。`requirement.revised` 的 `data` 只包含 `action`、`summary`。持久化 Run 的轮次从历史记录递增，后端重启后继续原会话不会重置编号
+
+报告输出出现 Pydantic 结构校验错误时，报告写作器将校验信息交回模型纠正一次；再次失败仍上报错误，不截断证据或放宽引用校验。相关回归覆盖 `tests/test_talent_conversation.py`、`tests/test_talent_run_stream.py` 和 `tests/test_talent_evaluation_report.py`，在 `backend/` 执行 `uv run pytest -q`
 
 ## 运行模式
 
@@ -609,6 +614,29 @@ uv run python -m scripts.verify_talent_run_live
 | `GET /api/runs/history/{run_id}` | 返回 Run、有序步骤、报告和引用快照 |
 
 前端通过 `historyDetailToRunView()` 将历史详情转换为第 19 课已有的 `RunView`，继续复用步骤时间线、节点输出抽屉、Markdown 报告和证据抽屉
+
+## 第 21 课多轮对话与人才要求修订
+
+| 路径 | 用途 |
+|---|---|
+| `backend/app/talent_checkpoint.py` | 管理 `AsyncPostgresSaver` 连接池、`setup()` 与应用生命周期 |
+| `backend/app/talent_request_graph.py` | 使用历史 `messages` 和当前结构化要求完成增删改 |
+| `backend/scripts/verify_postgres_checkpointer.py` | 用最小 Graph 验证两轮恢复与四张 Checkpoint 表 |
+| `database/migrations/021_conversation_history.sql` | 创建会话标题、状态与更新时间投影 |
+| `frontend/src/talent-conversation.css` | 会话状态筛选、多轮消息与修订反馈的页面样式 |
+
+同一会话复用 `conversation_id` 作为 `thread_id`，`AsyncPostgresSaver` 恢复父图的 `messages` 与当前结构化要求，请求子图合并本轮修订后继续完整执行评估与报告链路
+
+创建后续 Run 时提交当前会话标识：
+
+```json
+{
+  "message": "地区要求删除",
+  "conversation_id": "9cf60af0-0f74-4ec4-b887-29f29ed43ee7"
+}
+```
+
+前端通过 `GET /api/conversations?status=completed` 按状态读取会话标题、状态和更新时间，要求增删改通过 `requirement.revised` SSE 事件实时展示。打开会话时，历史详情接口一次返回截至当前轮的所有 Run、步骤和报告快照，前序轮次答案默认收起，最后一轮默认展开
 
 ## Chunk 模块
 

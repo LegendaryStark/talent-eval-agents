@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 
 def _dimension(dimension_name: str, weight_percent: int):
     from app.talent_evaluation_dispatch import EvaluationDimension, ScoreAnchor
@@ -639,6 +641,37 @@ def test_structured_report_writer_receives_ranked_assessments_and_verified_evide
     assert draft == expected
     assert "confirmed_score" in model.messages[1][1]
     assert "citation_url" not in model.messages[1][1]
+
+
+@pytest.mark.parametrize("invalid_attempts", [1, 2])
+def test_report_writer_retries_schema_validation_once(invalid_attempts):
+    from pydantic import ValidationError
+    from app.talent_evaluation_report import ReportDraft, build_structured_report_writer
+
+    class Model:
+        calls = 0
+
+        def with_structured_output(self, schema, **kwargs):
+            return self
+
+        def invoke(self, messages):
+            self.calls += 1
+            if self.calls > 1:
+                assert "校验" in messages[-1][1]
+            return ReportDraft.model_validate({
+                "title": "评估报告", "overview": "结果概述",
+                "candidates": [{"candidate_id": "C001", "summary": "证据摘要",
+                    "highlights": [{"text": "匹配依据", "evidence_refs": [f"E{i}" for i in range(9)]}] if self.calls <= invalid_attempts else []}],
+            })
+
+    model = Model()
+    writer = build_structured_report_writer(lambda: model)
+    if invalid_attempts == 2:
+        with pytest.raises(ValidationError):
+            writer([], [])
+    else:
+        assert writer([], []).title == "评估报告"
+    assert model.calls == 2
 
 
 def test_structured_report_writer_restores_short_refs_before_validation():

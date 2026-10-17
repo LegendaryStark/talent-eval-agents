@@ -97,6 +97,8 @@ class TalentRunRecord(Base):
     __tablename__ = "talent_runs"
 
     run_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(String(64), index=True)
+    turn_no: Mapped[int] = mapped_column(Integer)
     message: Mapped[str] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(32), index=True)
     report: Mapped[str | None] = mapped_column(Text)
@@ -106,6 +108,17 @@ class TalentRunRecord(Base):
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class TalentConversationRecord(Base):
+    __tablename__ = "talent_conversations"
+
+    conversation_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    title: Mapped[str] = mapped_column(String(255))
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    latest_run_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
 
 
 class TalentRunStepRecord(Base):
