@@ -638,6 +638,21 @@ uv run python -m scripts.verify_talent_run_live
 
 前端通过 `GET /api/conversations?status=completed` 按状态读取会话标题、状态和更新时间，要求增删改通过 `requirement.revised` SSE 事件实时展示。打开会话时，历史详情接口一次返回截至当前轮的所有 Run、步骤和报告快照，前序轮次答案默认收起，最后一轮默认展开
 
+## 第 22 课 Agent 模块评测与可复现 Case 设计
+
+| 路径 | 用途 |
+|---|---|
+| `backend/app/evaluation_case.py` | 定义首期四个评测模块、可重放 Case 协议与 SQL 存储器 |
+| `backend/app/talent_request_graph.py` | 在人才要求理解的真实调用边界自动记录输入与实际输出 |
+| `backend/app/talent_run_stream.py` | 为每个 Run 注入 `run_id`、`conversation_id` 和 `turn_no` |
+| `database/migrations/022_evaluation_cases.sql` | 创建四个模块共用的 `evaluation_cases` 原始 Case 表 |
+| `backend/scripts/verify_evaluation_case.py` | 调用真实 FastAPI Run 和 SSE，完成后从 PostgreSQL 读回自动采集结果 |
+| `backend/tests/test_evaluation_case_store.py` | 使用开发环境 PostgreSQL 验证持久化与调用序号，测试后删除自身记录 |
+
+完整消息继续保存在 LangGraph Checkpoint 中，人才要求理解模块使用最近四轮消息和上一轮完整 `TalentRequest` 形成独立输入。每次 Graph 调用都自动落库，新 Case 的标注状态为 `unlabeled`
+
+执行第 22 课真实链路验证前，需要按开发模式启动后端 API，并完成 `022_evaluation_cases.sql` 迁移。验证脚本会实际调用模型、检索服务和全部人才评估 Graph，直到接收 `run.completed`
+
 ## Chunk 模块
 
 | 路径 | 用途 |

@@ -145,6 +145,37 @@ class TalentRunStepRecord(Base):
     duration_ms: Mapped[int | None] = mapped_column(BigInteger)
 
 
+class EvaluationCaseRecord(Base):
+    __tablename__ = "evaluation_cases"
+    __table_args__ = (
+        UniqueConstraint(
+            "source_run_id",
+            "module_key",
+            "invocation_no",
+            name="uq_evaluation_case_invocation",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    source_run_id: Mapped[str] = mapped_column(String(64), index=True)
+    conversation_id: Mapped[str] = mapped_column(String(64), index=True)
+    turn_no: Mapped[int] = mapped_column(Integer)
+    module_key: Mapped[str] = mapped_column(String(64), index=True)
+    invocation_no: Mapped[int] = mapped_column(Integer)
+    input_payload: Mapped[dict] = mapped_column(JSON)
+    output_payload: Mapped[dict] = mapped_column(JSON)
+    replay_context: Mapped[dict] = mapped_column(JSON, default=dict)
+    version_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String(32), default="succeeded")
+    error_code: Mapped[str | None] = mapped_column(String(64))
+    duration_ms: Mapped[int | None] = mapped_column(BigInteger)
+    annotation_status: Mapped[str] = mapped_column(String(32), default="unlabeled")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+
+
 class KnowledgeBase(Base):
     __tablename__ = "knowledge_bases"
 

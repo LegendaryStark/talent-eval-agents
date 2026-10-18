@@ -147,6 +147,22 @@ def _capacity_exceeded_graph():
     return builder.compile()
 
 
+def _context_capture_graph(captured: list[DecisionContext]):
+    builder = StateGraph(StreamingState, context_schema=DecisionContext)
+
+    def capture_context(
+        _: StreamingState,
+        runtime,
+    ) -> dict[str, Any]:
+        captured.append(runtime.context)
+        return {"status": "completed"}
+
+    builder.add_node("capture_context", capture_context)
+    builder.add_edge(START, "capture_context")
+    builder.add_edge("capture_context", END)
+    return builder.compile()
+
+
 async def _wait_for_status(
     manager: TalentRunManager,
     run_id: str,
@@ -184,6 +200,22 @@ async def test_run_projects_compiled_graph_output_instead_of_fixture_report():
     assert "林晓" not in report.data["markdown"]
     assert [event.sequence for event in events] == list(range(1, len(events) + 1))
     assert events[-1].type == "run.completed"
+
+
+@pytest.mark.anyio
+async def test_each_run_injects_its_identity_into_graph_runtime_context():
+    captured: list[DecisionContext] = []
+    manager = _manager(_context_capture_graph(captured))
+
+    first = await manager.create_run("第一轮")
+    await _wait_for_status(manager, first.run_id, RunStatus.COMPLETED)
+    second = await manager.create_run("第二轮", conversation_id=first.conversation_id)
+    await _wait_for_status(manager, second.run_id, RunStatus.COMPLETED)
+
+    assert [(item.run_id, item.conversation_id, item.turn_no) for item in captured] == [
+        (first.run_id, first.conversation_id, 1),
+        (second.run_id, second.conversation_id, 2),
+    ]
 
 
 @pytest.mark.anyio

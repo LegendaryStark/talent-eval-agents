@@ -266,10 +266,17 @@ class TalentRunManager:
             graph = self._graph
             if graph is None:
                 raise RuntimeError("LangGraph 运行时未启动")
+            run_context = DecisionContext(
+                tenant_id=self._context.tenant_id,
+                permission_scopes=self._context.permission_scopes,
+                run_id=run.run_id,
+                conversation_id=run.conversation_id,
+                turn_no=run.turn_no,
+            )
             async for item in graph.astream(
                 graph_input,
                 self._config(run),
-                context=self._context,
+                context=run_context,
                 stream_mode=["tasks", "updates"],
                 subgraphs=True,
             ):

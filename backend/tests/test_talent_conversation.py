@@ -94,6 +94,31 @@ def test_different_thread_has_isolated_message_history():
     assert interpreter.calls[-1]["previous_request"] == {}
 
 
+def test_request_interpreter_receives_current_turn_and_three_previous_turns():
+    interpreter = ConversationInterpreter()
+    graph = build_talent_request_graph(
+        request_interpreter=interpreter,
+        job_lookup=lambda query, context: [],
+        checkpointer=InMemorySaver(),
+    )
+    config = {"configurable": {"thread_id": "conversation-window"}}
+
+    for turn in range(1, 6):
+        graph.invoke(
+            {"messages": [HumanMessage(content=f"第 {turn} 轮要求")]},
+            config,
+            context=_context(),
+        )
+
+    assert interpreter.calls[-1]["messages"] == [
+        "第 2 轮要求",
+        "第 3 轮要求",
+        "第 4 轮要求",
+        "第 5 轮要求",
+    ]
+    assert len(graph.get_state(config).values["messages"]) == 5
+
+
 def test_parent_passes_previous_request_and_preserves_title_across_four_turns():
     from app.talent_decision_engine import build_talent_decision_engine
 
@@ -189,4 +214,7 @@ def test_later_turn_does_not_ask_model_to_generate_title(monkeypatch):
     )
     assert "conversation_title" not in captured["schema"].model_fields
     assert result.conversation_title == "原会话标题"
-    assert "human: 消息 0\n" in captured["prompt"][1][1]
+    prompt = captured["prompt"][1][1]
+    assert "human: 消息 9\n" not in prompt
+    assert "human: 消息 10\n" in prompt
+    assert "human: 消息 13\n" in prompt

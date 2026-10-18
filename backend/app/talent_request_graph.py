@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 import inspect
 from operator import add
+from time import perf_counter
 from typing import Annotated, Any, Literal
 
 from langchain.messages import AnyMessage, HumanMessage
@@ -14,6 +15,13 @@ from pydantic import BaseModel, Field, ValidationError
 from typing_extensions import TypedDict
 
 from app.database import SessionLocal
+from app.config import get_settings
+from app.evaluation_case import (
+    EvaluationCaseDraft,
+    SqlEvaluationCaseStore,
+    build_request_understanding_case,
+    recent_request_messages,
+)
 from app.model_provider import get_chat_model
 from app.query_plan import (
     Clarification,
@@ -126,6 +134,7 @@ class TalentRequestState(TypedDict, total=False):
 RequestInterpreter = Callable[..., TalentRequestUnderstanding | TalentRequestDraft]
 JobLookup = Callable[[str, DecisionContext], list[JobMatch]]
 CandidateFilter = Callable[[list[FilterCondition], DecisionContext], list[str]]
+CaseRecorder = Callable[[EvaluationCaseDraft], Any]
 
 
 def _receive_request(state: TalentRequestState, runtime: Runtime[DecisionContext]) -> dict[str, Any]:
@@ -160,28 +169,95 @@ def _call_request_interpreter(
     interpreter: RequestInterpreter,
     state: TalentRequestState,
     selected_job: JobMatch | None,
+    context: DecisionContext,
+    case_recorder: CaseRecorder | None,
 ) -> TalentRequestUnderstanding:
-    parameters = inspect.signature(interpreter).parameters
-    if len(parameters) <= 2:
-        legacy = interpreter(state["request_text"], selected_job)
-        if isinstance(legacy, TalentRequestUnderstanding):
-            return legacy
-        return TalentRequestUnderstanding(
-            draft=TalentRequestDraft.model_validate(legacy),
-            conversation_title=state.get("conversation_title") or state["request_text"][:30],
+    started_at = perf_counter()
+    try:
+        parameters = inspect.signature(interpreter).parameters
+        if len(parameters) <= 2:
+            legacy = interpreter(state["request_text"], selected_job)
+            if isinstance(legacy, TalentRequestUnderstanding):
+                understanding = legacy
+            else:
+                understanding = TalentRequestUnderstanding(
+                    draft=TalentRequestDraft.model_validate(legacy),
+                    conversation_title=state.get("conversation_title") or state["request_text"][:30],
+                )
+        else:
+            result = interpreter(
+                recent_request_messages(list(state.get("messages", []))),
+                dict(state.get("talent_request", {})),
+                selected_job,
+                state.get("conversation_title", ""),
+            )
+            understanding = TalentRequestUnderstanding.model_validate(result)
+    except Exception as exc:
+        if case_recorder is not None and context.run_id:
+            case_recorder(
+                build_request_understanding_case(
+                    source_run_id=context.run_id,
+                    conversation_id=context.conversation_id,
+                    turn_no=context.turn_no,
+                    messages=list(state.get("messages", [])),
+                    previous_request=dict(state.get("talent_request", {})),
+                    conversation_title=state.get("conversation_title", ""),
+                    selected_job=selected_job,
+                    output_payload={},
+                    replay_context={
+                        "tenant_id": context.tenant_id,
+                        "permission_scopes": list(context.permission_scopes),
+                    },
+                    version_snapshot={
+                        "prompt": "request-understanding-v1",
+                        "model": get_settings().chat_model,
+                    },
+                    status="failed",
+                    error_code=type(exc).__name__,
+                    duration_ms=round((perf_counter() - started_at) * 1000),
+                )
+            )
+        raise
+    if case_recorder is not None and context.run_id:
+        case_recorder(
+            build_request_understanding_case(
+                source_run_id=context.run_id,
+                conversation_id=context.conversation_id,
+                turn_no=context.turn_no,
+                messages=list(state.get("messages", [])),
+                previous_request=dict(state.get("talent_request", {})),
+                conversation_title=state.get("conversation_title", ""),
+                selected_job=selected_job,
+                output_payload=understanding.model_dump(mode="json"),
+                replay_context={
+                    "tenant_id": context.tenant_id,
+                    "permission_scopes": list(context.permission_scopes),
+                },
+                version_snapshot={
+                    "prompt": "request-understanding-v1",
+                    "model": get_settings().chat_model,
+                },
+                duration_ms=round((perf_counter() - started_at) * 1000),
+            )
         )
-    result = interpreter(
-        list(state.get("messages", [])),
-        dict(state.get("talent_request", {})),
-        selected_job,
-        state.get("conversation_title", ""),
-    )
-    return TalentRequestUnderstanding.model_validate(result)
+    return understanding
 
 
-def _interpret_input(request_interpreter: RequestInterpreter):
-    def interpret_input(state: TalentRequestState) -> dict[str, Any]:
-        understanding = _call_request_interpreter(request_interpreter, state, None)
+def _interpret_input(
+    request_interpreter: RequestInterpreter,
+    case_recorder: CaseRecorder | None,
+):
+    def interpret_input(
+        state: TalentRequestState,
+        runtime: Runtime[DecisionContext],
+    ) -> dict[str, Any]:
+        understanding = _call_request_interpreter(
+            request_interpreter,
+            state,
+            None,
+            runtime.context,
+            case_recorder,
+        )
         draft = understanding.draft
         return {
             "draft": draft.model_dump(mode="json"),
@@ -263,12 +339,20 @@ def _route_job_confirmation(state: TalentRequestState) -> str:
     return "compile_selected_job" if state["status"] == "job_confirmed" else END
 
 
-def _compile_selected_job(request_interpreter: RequestInterpreter):
-    def compile_selected_job(state: TalentRequestState) -> dict[str, Any]:
+def _compile_selected_job(
+    request_interpreter: RequestInterpreter,
+    case_recorder: CaseRecorder | None,
+):
+    def compile_selected_job(
+        state: TalentRequestState,
+        runtime: Runtime[DecisionContext],
+    ) -> dict[str, Any]:
         understanding = _call_request_interpreter(
             request_interpreter,
             state,
             state["selected_job"],
+            runtime.context,
+            case_recorder,
         )
         draft = understanding.draft
         return {
@@ -666,6 +750,7 @@ def build_talent_request_graph(
     request_interpreter: RequestInterpreter,
     job_lookup: JobLookup,
     candidate_filter: CandidateFilter | None = None,
+    case_recorder: CaseRecorder | None = None,
     checkpointer: Any | None = None,
 ):
     builder = StateGraph(
@@ -675,11 +760,14 @@ def build_talent_request_graph(
         output_schema=TalentRequestOutput,
     )
     builder.add_node("receive_request", _receive_request)
-    builder.add_node("interpret_input", _interpret_input(request_interpreter))
+    builder.add_node("interpret_input", _interpret_input(request_interpreter, case_recorder))
     builder.add_node("lookup_jobs", _lookup_jobs(job_lookup))
     builder.add_node("select_exact_job", _select_exact_job)
     builder.add_node("confirm_job", _confirm_job)
-    builder.add_node("compile_selected_job", _compile_selected_job(request_interpreter))
+    builder.add_node(
+        "compile_selected_job",
+        _compile_selected_job(request_interpreter, case_recorder),
+    )
     builder.add_node("build_plan", _build_plan)
     builder.add_node("no_job_match", _no_job_match)
     builder.add_edge(START, "receive_request")
@@ -720,7 +808,7 @@ def build_talent_request_graph(
 
 
 MODEL_SYSTEM_PROMPT = """你是人才评估任务编译器。按照给定 Schema 输出结构化结果。
-结合完整消息历史和 previous_request，输出本轮修订后的完整 TalentRequestDraft。
+结合最近消息窗口和 previous_request，输出本轮修订后的完整 TalentRequestDraft。
 首轮 revision_action 为 initial，conversation_title 为空时生成不超过 20 个中文字的标题。
 已有 conversation_title 时不生成标题，后续轮根据最新消息在 add、update、remove 中选择，保留未被修改的既有条件。
 用 revision_summary 简要说明变化。
@@ -743,6 +831,7 @@ def model_request_interpreter(
     model = get_chat_model(temperature=0)
     if model is None:
         raise RuntimeError("任务理解模型未配置，请设置 DASHSCOPE_API_KEY")
+    messages = recent_request_messages(messages)
     history = "\n".join(
         f"{getattr(message, 'type', 'user')}: {message.content}" for message in messages
     )
@@ -799,4 +888,5 @@ graph = build_talent_request_graph(
     request_interpreter=model_request_interpreter,
     job_lookup=database_job_lookup,
     candidate_filter=database_candidate_filter,
+    case_recorder=SqlEvaluationCaseStore(SessionLocal).record,
 )
