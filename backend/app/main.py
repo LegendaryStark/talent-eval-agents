@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.requests import Request
 
 from app.api import router
+from app.evaluation_api import router as evaluation_router
 from app.config import get_settings
 from app.database import SessionLocal
 from app.logging_config import configure_logging
@@ -73,6 +74,7 @@ def create_app(*, talent_run_manager: TalentRunManager | None = None) -> FastAPI
         return {"service": "talent-document-api", "status": "ok"}
 
     app.include_router(router)
+    app.include_router(evaluation_router)
     app.include_router(talent_run_router)
     app.include_router(conversation_router)
     return app

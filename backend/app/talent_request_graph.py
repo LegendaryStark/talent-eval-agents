@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from app.evaluation_case import capture_call, EvaluationModule, safe_record
+
 from collections.abc import Callable
 import inspect
 from operator import add
@@ -194,7 +196,7 @@ def _call_request_interpreter(
             understanding = TalentRequestUnderstanding.model_validate(result)
     except Exception as exc:
         if case_recorder is not None and context.run_id:
-            case_recorder(
+            safe_record(case_recorder,
                 build_request_understanding_case(
                     source_run_id=context.run_id,
                     conversation_id=context.conversation_id,
@@ -219,7 +221,7 @@ def _call_request_interpreter(
             )
         raise
     if case_recorder is not None and context.run_id:
-        case_recorder(
+        safe_record(case_recorder,
             build_request_understanding_case(
                 source_run_id=context.run_id,
                 conversation_id=context.conversation_id,
@@ -275,10 +277,21 @@ def _route_input(state: TalentRequestState) -> Literal["lookup_jobs", "build_pla
     return "lookup_jobs" if state["input_mode"] == "job_name" else "build_plan"
 
 
-def _lookup_jobs(job_lookup: JobLookup):
+def _lookup_jobs(job_lookup: JobLookup, case_recorder=None):
     def lookup_jobs(state: TalentRequestState, runtime: Runtime[DecisionContext]) -> dict[str, Any]:
         job_query = str(state["draft"].get("job_query") or state["request_text"])
-        matches = job_lookup(job_query, runtime.context)
+
+        # 岗位匹配 Case 要在查询完成后、Graph 路由前采集。
+        # 输出同时保存完整候选列表和本次路由结果，避免后续只看到最终岗位，无法判断问题来自名称匹配还是岗位确认分支。
+        def match_and_route():
+            matches = job_lookup(job_query, runtime.context)
+            return {"matches": matches, "route": _route_job_matches({"job_matches": matches})}
+
+        result = capture_call(match_and_route, context=runtime.context,
+            module_key=EvaluationModule.JOB_MATCHING,
+            input_payload={"job_query": job_query}, recorder=case_recorder,
+            version_snapshot={"matching_rules": "job-lookup-v1"})
+        matches = result["matches"]
         return {"job_matches": matches, "status": "jobs_found"}
 
     return lookup_jobs
@@ -761,7 +774,7 @@ def build_talent_request_graph(
     )
     builder.add_node("receive_request", _receive_request)
     builder.add_node("interpret_input", _interpret_input(request_interpreter, case_recorder))
-    builder.add_node("lookup_jobs", _lookup_jobs(job_lookup))
+    builder.add_node("lookup_jobs", _lookup_jobs(job_lookup, case_recorder))
     builder.add_node("select_exact_job", _select_exact_job)
     builder.add_node("confirm_job", _confirm_job)
     builder.add_node(

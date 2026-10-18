@@ -1,6 +1,8 @@
 """Lesson 9: evidence organization. Model judgments remain reviewable hypotheses."""
 from __future__ import annotations
 
+from app.evaluation_case import capture_call, current_extraction_scope, EvaluationModule
+
 import json
 import logging
 import time
@@ -111,7 +113,24 @@ def model_extractor(
         ]
         for attempt in range(1, max_attempts + 1):
             try:
-                raw = structured_model.invoke(messages)
+                scope = current_extraction_scope()
+                if scope is None:
+                    raw = structured_model.invoke(messages)
+                else:
+                    from app.config import get_settings
+                    context, identity = scope
+
+                    # 事实抽取 Case 在模型返回结构化结果后、真实 Chunk ID 还原和
+                    # 引用校验前采集。input_payload 保存模型实际看到的冻结文本、
+                    # source_1 等短标识及候选人/维度/证据要求身份，replay_context
+                    # 保存短标识到真实 Chunk ID 的映射和完整来源上下文。
+                    # 后续事实合并、引用校验和冲突推导属于确定性后处理，不回写
+                    # 模型原始输出；每次模型重试通过 attempt 形成独立 Case。
+                    raw = capture_call(lambda: structured_model.invoke(messages),
+                        context=context, module_key=EvaluationModule.FACT_EXTRACTION,
+                        input_payload={**payload, **identity, "attempt": attempt},
+                        replay_extra={"source_aliases": source_aliases, "sources": sources},
+                        version_snapshot={"prompt": "evidence-extraction-v1", "model": get_settings().chat_model})
                 break
             except retryable as exc:
                 if attempt >= max_attempts:

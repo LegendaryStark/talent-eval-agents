@@ -59,7 +59,8 @@ def _load_case(run_id: str) -> EvaluationCaseRecord:
         rows = list(
             session.scalars(
                 select(EvaluationCaseRecord)
-                .where(EvaluationCaseRecord.source_run_id == run_id)
+                .where(EvaluationCaseRecord.source_run_id == run_id,
+                       EvaluationCaseRecord.module_key == "request_understanding")
                 .order_by(EvaluationCaseRecord.invocation_no)
             )
         )

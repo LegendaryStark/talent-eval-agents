@@ -349,3 +349,13 @@ class EvidenceIndexJob(Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class EvaluationFeedbackRecord(Base):
+    __tablename__ = 'evaluation_feedback'
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    source_run_id: Mapped[str] = mapped_column(ForeignKey('talent_runs.run_id'), index=True)
+    case_id: Mapped[UUID | None] = mapped_column(ForeignKey('evaluation_cases.id'), index=True)
+    feedback_scope: Mapped[str] = mapped_column(String(16))
+    note: Mapped[str] = mapped_column(Text, default='')
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

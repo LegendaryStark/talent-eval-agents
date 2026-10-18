@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from app.evaluation_case import capture_call, EvaluationModule, extraction_scope
+
 import json
 import logging
 import operator
@@ -360,19 +362,22 @@ def build_evidence_branch_worker(service: Any, executor: ToolExecutor) -> Branch
                 work_item.task_id, work_item.candidate_id,
                 work_item.dimension_number, requirement_id, len(query),
             )
-            envelope = executor.execute(
-                "search_candidate_evidence",
-                lambda query=query: service.search_candidate_evidence(
-                    query,
-                    [work_item.candidate_id],
+            with extraction_scope(context, candidate_id=work_item.candidate_id,
+                                  dimension_number=work_item.dimension_number,
+                                  requirement_id=requirement_id, task_id=work_item.task_id):
+                envelope = executor.execute(
+                    "search_candidate_evidence",
+                    lambda query=query: service.search_candidate_evidence(
+                        query,
+                        [work_item.candidate_id],
+                        context=tool_context,
+                    ),
                     context=tool_context,
-                ),
-                context=tool_context,
-                arguments={
-                    "query": query,
-                    "candidate_ids": [work_item.candidate_id],
-                },
-            )
+                    arguments={
+                        "query": query,
+                        "candidate_ids": [work_item.candidate_id],
+                    },
+                )
             meta = envelope.get("meta") or {}
             call_id = meta.get("call_id")
             normalized_call_id = call_id if isinstance(call_id, str) and call_id else None
@@ -566,10 +571,18 @@ def _receive_input(
 
 
 def _generate_dimensions(dimension_generator: DimensionGenerator):
-    def generate_dimensions(state: TalentEvaluationDispatchState) -> dict[str, Any]:
-        plan = dimension_generator(
-            state["talent_request"],
-            state["query_plan"],
+    def generate_dimensions(state: TalentEvaluationDispatchState, runtime: Runtime[DecisionContext]) -> dict[str, Any]:
+        from app.config import get_settings
+
+        # 维度生成 Case 必须在确定性校验前采集模型的原始结构化输出。
+        # talent_request 与 query_plan 组成可重放输入，输出保留完整维度、
+        # 权重、证据要求、评分锚点、检索提示和来源需求编号。
+        # 校验结果继续由下游 validate_dimensions 生成，不混入当前 Case。
+        plan = capture_call(
+            lambda: dimension_generator(state["talent_request"], state["query_plan"]),
+            context=runtime.context, module_key=EvaluationModule.DIMENSION_GENERATION,
+            input_payload={"talent_request": state["talent_request"], "query_plan": state["query_plan"]},
+            version_snapshot={"prompt": "dimension-generator-v1", "model": get_settings().chat_model},
         )
         logger.info(
             "event=graph_node_completed function=generate_dimensions "

@@ -840,3 +840,51 @@ backend/logs/worker-error-YYYY-MM-DD.log
 - Milvus Health：`19091`
 - Backend API：`18080`
 - Frontend：`15173`
+
+## 第 23 课线上 Case 采集与评测中心
+
+四个模块共用 `evaluation_cases`。`capture_call` 保存调用前深拷贝的输入与返回结果或异常，`safe_record` 隔离写入失败；PostgreSQL 事务锁串行分配同一 Run/模块的调用序号。事实抽取在每次模型尝试边界采集，保留短 Chunk 标识、冻结文本、输出 Schema、来源映射和候选人/维度/要求身份。冲突与引用校验属于后处理，不写成模型输出。
+
+| 路径 | 用途、关键接口 |
+| --- | --- |
+| `backend/app/evaluation_case.py` | `capture_call(call, context, module_key, input_payload, ...)` 返回原业务结果；`extraction_scope` 管理线程内业务身份 |
+| `backend/app/talent_request_graph.py` | 岗位候选及路由采集、要求理解采集失败隔离 |
+| `backend/app/talent_evaluation_dispatch.py` | 维度生成采集、证据要求线程设置身份 |
+| `backend/app/evidence_pack.py` | 模型输入与原始短标识输出采集，模型重试逐次记录 |
+| `backend/app/talent_tools.py` | `copy_context().run` 将调用方上下文传给工具执行线程 |
+| `backend/app/models.py` | `EvaluationFeedbackRecord`，反馈外键关联 Run 与可选 Case |
+| `backend/app/evaluation_api.py` | Case 分页筛选、详情和反馈创建接口 |
+| `database/migrations/023_evaluation_feedback.sql` | 幂等新增反馈表与索引、范围组合约束 |
+| `frontend/src/EvaluationCenter.tsx` | 评测中心、步骤调用选择与反馈表单 |
+| `frontend/src/evaluation.css` | 评测中心与反馈表单样式 |
+| `backend/scripts/verify_evaluation_case.py` | 第 22 课验收继续明确筛选要求理解模块，避免其他模块加入后读取错误记录 |
+| `backend/scripts/verify_evaluation_center.py` | 真实模型 Run → 四模块采集 → 两种反馈 → PostgreSQL 关联断言 |
+| `backend/tests/test_lesson23_collection.py` | PostgreSQL 并发、异常隔离、跨工具线程身份验证 |
+| `backend/tests/test_evaluation_feedback.py` | 请求范围、关联有效性、原始载荷不变与查询验证 |
+
+接口：
+
+- `GET /api/evaluation/cases`：支持 `source_run_id`、`module_key`、`status`、`has_feedback`、`offset`、`limit`，返回 `items` 与 `has_more`
+- `GET /api/evaluation/cases/{case_id}`：原始输入输出、上下文、版本和关联反馈
+- `POST /api/evaluation/feedback`：`source_run_id`、`case_id`、`feedback_scope`、`note`，模块必须引用同 Run 的 Case，报告级 Case 为空
+
+`has_feedback` 仅表示模块直接反馈，`run_has_feedback` 单独表示报告反馈。反馈不会自动标注得分或修改 `annotation_status`。页面每页 100 条调用，同 Run 可跨页；步骤抽屉按每页 200 条读取当前 Run 的全部记录，再按步骤模块筛选。
+
+工程根目录执行迁移：
+
+```bash
+docker compose -p talent-eval-agents-course exec -T postgres \
+  psql -U talent -d talent_docs -v ON_ERROR_STOP=1 -f /dev/stdin \
+  < database/migrations/023_evaluation_feedback.sql
+```
+
+按开发模式启动后端 18080 与前端 15173，进入评测中心；真实验收要求已有岗位、人才材料及 Milvus 索引，且模型、Embedding 和 Rerank 配置有效。
+
+```bash
+cd backend
+uv run --no-sync python -m scripts.verify_evaluation_center
+```
+
+验收 Run `1e5a2d03-4db3-4897-86dc-b041277213fd` 完成报告，共采集 58 条 Case，其中事实抽取 54 条、失败 Case 1 条，两种反馈各 1 条。模型结果与数量可能变化。
+
+当前沿用课程单租户开发访问边界，没有新增身份认证；原文 Case 访问需要在部署前与既有 Run、人才材料接口统一实施授权。采集采用尽力写入，数据库失败会记录 `case_collection_failed`，不会阻断业务，也没有持久化补偿队列。岗位 Case 保存候选版本与规则版本，严格重放还需要固定当时岗位库。

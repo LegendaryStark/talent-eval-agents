@@ -17,6 +17,7 @@ import {
   X,
 } from "lucide-react";
 import { EvidencePackPanel } from "./EvidencePackPanel";
+import { EvaluationCenter } from "./EvaluationCenter";
 import { TalentChatPage } from "./TalentChatPage";
 import "./style.css";
 import "./refinements.css";
@@ -526,7 +527,7 @@ function RecallLab({
 }
 
 function App() {
-  const [productSection, setProductSection] = useState<"records" | "chat">("records");
+  const [productSection, setProductSection] = useState<"records" | "chat" | "evaluation">("records");
   const [page, setPage] = useState<"roster" | "library">("roster");
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [kbs, setKbs] = useState<KB[]>([]);
@@ -707,12 +708,15 @@ function App() {
     }
   }
 
+  if (productSection === "evaluation") return <EvaluationCenter apiBase={API} onChat={() => setProductSection("chat")} onRecords={() => setProductSection("records")} />;
+
   if (productSection === "chat") {
     return (
       <TalentChatPage
         apiBase={API}
         sidebarCollapsed={sidebarCollapsed}
         onToggleSidebar={() => setSidebarCollapsed((value) => !value)}
+        onOpenEvaluation={() => setProductSection("evaluation")}
         onOpenRecords={() => setProductSection("records")}
       />
     );
@@ -755,7 +759,7 @@ function App() {
             <Sparkles />
             <span>评估与推荐</span>
           </button>
-          <button>
+          <button onClick={() => setProductSection("evaluation")}>
             <FlaskConical />
             <span>评测中心</span>
           </button>

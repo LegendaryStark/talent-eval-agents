@@ -160,9 +160,10 @@ def test_unique_exact_job_match_continues_without_interrupt():
         ("高级 AI 应用工程师", None),
         ("高级 AI 应用工程师", "JD-AI-001"),
     ]
-    assert len(captured) == 2
+    assert len(captured) == 3
+    assert captured[1].output_payload["route"] == "select_exact_job"
     assert captured[0].input_payload["selected_job"] is None
-    assert captured[1].input_payload["selected_job"]["job_code"] == "JD-AI-001"
+    assert captured[2].input_payload["selected_job"]["job_code"] == "JD-AI-001"
 
 
 def test_ambiguous_job_match_interrupts_and_resumes_same_thread():

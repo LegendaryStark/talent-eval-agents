@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { FeedbackButton, StepCaseFeedback } from "./EvaluationCenter";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
@@ -58,6 +59,7 @@ type Props = {
   sidebarCollapsed: boolean;
   onToggleSidebar: () => void;
   onOpenRecords: () => void;
+  onOpenEvaluation?: () => void;
 };
 
 type ConversationSummary = {
@@ -125,13 +127,14 @@ function stepStatusLabel(step: RunStep): string {
   return step.total ? `${step.completed || 0}/${step.total}` : "执行中";
 }
 
-export function TalentChatPage({ apiBase, sidebarCollapsed, onToggleSidebar, onOpenRecords }: Props) {
+export function TalentChatPage({ apiBase, sidebarCollapsed, onToggleSidebar, onOpenRecords, onOpenEvaluation }: Props) {
   const [message, setMessage] = useState("我们正在为上海研发团队招聘一名高级 AI 应用工程师，要求至少 5 年后端或 AI 应用开发经验，并做过企业知识库和 Agent 评测项目。请基于现有简历给出候选人证据、风险和推荐结论");
   const [view, setView] = useState<RunView>(initialRunView);
   const [revision, setRevision] = useState("");
   const [busy, setBusy] = useState(false);
   const [connection, setConnection] = useState<"idle" | "connected" | "reconnecting">("idle");
   const [activeCitation, setActiveCitation] = useState<Citation | null>(null);
+  const [activeStepRun, setActiveStepRun] = useState("");
   const [activeStep, setActiveStep] = useState<RunStep | null>(null);
   const [expandedRunIds, setExpandedRunIds] = useState<Set<string>>(new Set());
   const [history, setHistory] = useState<ConversationSummary[]>([]);
@@ -278,7 +281,7 @@ export function TalentChatPage({ apiBase, sidebarCollapsed, onToggleSidebar, onO
           <button><LayoutGrid /><span>工作台</span></button>
           <button onClick={onOpenRecords}><UserSquare2 /><span>人才档案</span></button>
           <button className="active"><Sparkles /><span>评估与推荐</span></button>
-          <button><FlaskConical /><span>评测中心</span></button>
+          <button onClick={onOpenEvaluation}><FlaskConical /><span>评测中心</span></button>
         </nav>
         <div className="env"><div><i /><b>测试环境</b></div><small>服务正常 · V1.0</small></div>
         <button type="button" className="sideToggle" onClick={onToggleSidebar} aria-label={sidebarCollapsed ? "展开导航栏" : "收起导航栏"}>
@@ -324,9 +327,9 @@ export function TalentChatPage({ apiBase, sidebarCollapsed, onToggleSidebar, onO
                     </button>
                     {expanded && <div className="turnAnswerBody">
                       {revisionSummary && <section className="resolvedRequest"><div><b>要求修订已识别</b><span>{revisionAction === "add" ? "增加要求" : revisionAction === "update" ? "修改要求" : "删除要求"}</span></div><p>{revisionSummary}</p></section>}
-                      {steps.length > 0 && <section className="runTimeline"><div className="timelineHead"><div><Sparkles /><b>{status === "completed" ? "人才评估执行完成" : status === "cancelled" ? "人才评估已取消" : status === "waiting_input" ? "人才评估等待确认" : "正在执行人才评估"}</b></div><code>{turn.runId.slice(0, 8)}</code></div>{steps.map((step) => <button type="button" className={`timelineStep ${step.status}${activeStep === step ? " selected" : ""}`} key={step.stepId} onClick={() => setActiveStep(step)}><span><StepStatusIcon step={step} /></span><div><b>{step.title}</b>{step.summary && <p>{step.summary}</p>}{step.total !== undefined && <div className="progressTrack"><i style={{ width: `${step.total ? ((step.completed || 0) / step.total) * 100 : 0}%` }} /></div>}</div><small><em>{stepStatusLabel(step)}</em><time>{formatDuration(step.durationMs)}</time></small></button>)}</section>}
+                      {steps.length > 0 && <section className="runTimeline"><div className="timelineHead"><div><Sparkles /><b>{status === "completed" ? "人才评估执行完成" : status === "cancelled" ? "人才评估已取消" : status === "waiting_input" ? "人才评估等待确认" : "正在执行人才评估"}</b></div><code>{turn.runId.slice(0, 8)}</code></div>{steps.map((step) => <button type="button" className={`timelineStep ${step.status}${activeStep === step ? " selected" : ""}`} key={step.stepId} onClick={() => {setActiveStep(step);setActiveStepRun(turn.runId);}}><span><StepStatusIcon step={step} /></span><div><b>{step.title}</b>{step.summary && <p>{step.summary}</p>}{step.total !== undefined && <div className="progressTrack"><i style={{ width: `${step.total ? ((step.completed || 0) / step.total) * 100 : 0}%` }} /></div>}</div><small><em>{stepStatusLabel(step)}</em><time>{formatDuration(step.durationMs)}</time></small></button>)}</section>}
                       {isCurrent && view.interrupt && <section className="hitlCard"><div className="hitlIcon"><Clock3 /></div><div><h3>{view.interrupt.title}</h3><p>{view.interrupt.description}</p>{view.interrupt.input_kind === "text" ? <div className="hitlRevision"><textarea value={revision} onChange={(event) => setRevision(event.target.value)} /><button disabled={!revision.trim()} onClick={() => void resume(revision)}>提交修订并继续</button></div> : <div className="hitlOptions">{view.interrupt.options.map((option) => <button key={option.value} onClick={() => void resume(option.value)}>{option.label}</button>)}</div>}</div></section>}
-                      {report && <section className="reportCard"><div className="reportHead"><div><Check /><span><b>评估完成</b><small>结论均可回溯到人才原始材料</small></span></div><button className="traceButton">Run · {traceId.slice(0, 8)}</button></div><MarkdownReport text={report} onCitation={(ref) => setActiveCitation(citations.find((item) => item.ref === ref) || null)} /></section>}
+                      {report && <section className="reportCard"><div className="reportHead"><div><Check /><span><b>评估完成</b><small>结论均可回溯到人才原始材料</small></span></div><button className="traceButton">Run · {traceId.slice(0, 8)}</button></div><MarkdownReport text={report} onCitation={(ref) => setActiveCitation(citations.find((item) => item.ref === ref) || null)} /><FeedbackButton apiBase={apiBase} runId={turn.runId} /></section>}
                       {status === "cancelled" && <div className="runNotice">运行已取消，已产生的事件保留在当前页面</div>}
                       {error && <div className="runNotice error">{error}</div>}
                     </div>}
@@ -341,7 +344,7 @@ export function TalentChatPage({ apiBase, sidebarCollapsed, onToggleSidebar, onO
       </main>
 
       {activeCitation && <div className="citationOverlay" onClick={() => setActiveCitation(null)}><aside className="citationDrawer" onClick={(event) => event.stopPropagation()}><button className="close" onClick={() => setActiveCitation(null)}><X /></button><small>{activeCitation.ref} · 证据原文</small><h2>{activeCitation.candidate}</h2><p>{activeCitation.document}</p><blockquote>{activeCitation.quote}</blockquote><div className="citationMeta"><span>权限已校验</span><span>当前文档版本</span></div>{activeCitation.url && <code className="citationPath">{activeCitation.url}</code>}</aside></div>}
-      {activeStep && <div className="stepOutputOverlay" onClick={() => setActiveStep(null)}><aside className="stepOutputDrawer" onClick={(event) => event.stopPropagation()}><button className="close" onClick={() => setActiveStep(null)}><X /></button><small><Braces />节点输出</small><h2>{activeStep.title}</h2><div className="stepOutputMeta"><span>{stepStatusLabel(activeStep)}</span><span>{formatDuration(activeStep.durationMs)}</span></div>{activeStep.output ? <pre>{JSON.stringify(activeStep.output, null, 2)}</pre> : <p className="emptyStepOutput">节点完成后显示受控的业务输出</p>}</aside></div>}
+      {activeStep && <div className="stepOutputOverlay" onClick={() => setActiveStep(null)}><aside className="stepOutputDrawer" onClick={(event) => event.stopPropagation()}><button className="close" onClick={() => setActiveStep(null)}><X /></button><small><Braces />节点输出</small><h2>{activeStep.title}</h2><StepCaseFeedback apiBase={apiBase} runId={activeStepRun} stepId={activeStep.stepId} /><div className="stepOutputMeta"><span>{stepStatusLabel(activeStep)}</span><span>{formatDuration(activeStep.durationMs)}</span></div>{activeStep.output ? <pre>{JSON.stringify(activeStep.output, null, 2)}</pre> : <p className="emptyStepOutput">节点完成后显示受控的业务输出</p>}</aside></div>}
     </div>
   );
 }

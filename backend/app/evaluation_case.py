@@ -5,7 +5,8 @@ from typing import Any, Literal
 
 from langchain.messages import AnyMessage
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
+from hashlib import sha256
 from sqlalchemy.orm import sessionmaker
 
 from app.models import EvaluationCaseRecord
@@ -43,6 +44,11 @@ class SqlEvaluationCaseStore:
 
     def record(self, draft: EvaluationCaseDraft) -> EvaluationCaseRecord:
         with self._session_factory() as session:
+            if session.bind.dialect.name == "postgresql":
+                lock_key = int.from_bytes(sha256(
+                    f"{draft.source_run_id}:{draft.module_key.value}".encode()
+                ).digest()[:8], "big", signed=True) # 事务锁，防止并发写入时出现唯一键冲突
+                session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": lock_key})
             last_no = session.scalar(
                 select(func.max(EvaluationCaseRecord.invocation_no)).where(
                     EvaluationCaseRecord.source_run_id == draft.source_run_id,
@@ -122,3 +128,66 @@ def build_request_understanding_case(
         error_code=error_code,
         duration_ms=duration_ms,
     )
+
+
+# Each extraction thread enters its own scope; no mutable global Run identity.
+from contextlib import contextmanager
+from contextvars import ContextVar
+from copy import deepcopy
+from time import perf_counter
+import logging
+
+_capture_scope = ContextVar('evaluation_capture_scope', default=None)
+logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def extraction_scope(context, **identity):
+    token = _capture_scope.set((context, identity))
+    try:
+        yield
+    finally:
+        _capture_scope.reset(token)
+
+
+def current_extraction_scope():
+    return _capture_scope.get()
+
+
+def safe_record(recorder, draft):
+    try:
+        return recorder(draft)
+    except Exception as exc:
+        logger.error('event=case_collection_failed run_id=%s module=%s error_type=%s',
+                     draft.source_run_id, draft.module_key, type(exc).__name__)
+        return None
+
+
+def capture_call(call, *, context, module_key, input_payload, recorder=None,
+                 version_snapshot=None, replay_extra=None):
+    if context is None or not context.run_id:
+        return call()
+    if recorder is None:
+        from app.database import SessionLocal
+        recorder = SqlEvaluationCaseStore(SessionLocal).record
+    snapshot = deepcopy(input_payload)
+    started = perf_counter()
+    output, error = {}, None
+    try:
+        result = call()
+        output = result.model_dump(mode='json') if isinstance(result, BaseModel) else deepcopy(result)
+        return result
+    except Exception as exc:
+        error = type(exc).__name__
+        raise
+    finally:
+        safe_record(recorder, EvaluationCaseDraft(
+            source_run_id=context.run_id, conversation_id=context.conversation_id,
+            turn_no=context.turn_no, module_key=module_key, input_payload=snapshot,
+            output_payload=output, replay_context={
+                'tenant_id': context.tenant_id,
+                'permission_scopes': list(context.permission_scopes), **(replay_extra or {}),
+            }, version_snapshot=version_snapshot or {},
+            status='failed' if error else 'succeeded', error_code=error,
+            duration_ms=round((perf_counter() - started) * 1000),
+        ))
