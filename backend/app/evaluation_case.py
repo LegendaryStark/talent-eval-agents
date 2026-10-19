@@ -170,14 +170,14 @@ def capture_call(call, *, context, module_key, input_payload, recorder=None,
     if recorder is None:
         from app.database import SessionLocal
         recorder = SqlEvaluationCaseStore(SessionLocal).record
-    snapshot = deepcopy(input_payload)
+    snapshot = deepcopy(input_payload) # 1. 深拷贝输入
     started = perf_counter()
     output, error = {}, None
     try:
-        result = call()
+        result = call() # 2. 执行原有逻辑
         output = result.model_dump(mode='json') if isinstance(result, BaseModel) else deepcopy(result)
-        return result
-    except Exception as exc:
+        return result # 3. 返回结果
+    except Exception as exc: # 4. 原样返回执行模块内的异常
         error = type(exc).__name__
         raise
     finally:

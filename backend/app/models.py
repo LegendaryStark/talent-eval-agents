@@ -359,3 +359,32 @@ class EvaluationFeedbackRecord(Base):
     feedback_scope: Mapped[str] = mapped_column(String(16))
     note: Mapped[str] = mapped_column(Text, default='')
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class EvaluationAnnotationRecord(Base):
+    __tablename__ = 'evaluation_annotations'
+    case_id: Mapped[UUID] = mapped_column(ForeignKey('evaluation_cases.id'), primary_key=True)
+    annotator_type: Mapped[str] = mapped_column(String(16))
+    judge_version: Mapped[str] = mapped_column(String(64))
+    judge_model: Mapped[str | None] = mapped_column(String(128))
+    score: Mapped[int | None] = mapped_column(Integer)
+    verdict: Mapped[str] = mapped_column(String(32))
+    error_types: Mapped[list] = mapped_column(JSON, default=list)
+    reason: Mapped[str] = mapped_column(Text)
+    golden_candidate: Mapped[dict | None] = mapped_column(JSON)
+    confidence: Mapped[float | None] = mapped_column(Float)
+    review_status: Mapped[str] = mapped_column(String(16), default='pending')
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class EvaluationDatasetItemRecord(Base):
+    __tablename__ = 'evaluation_dataset_items'
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    source_case_id: Mapped[UUID] = mapped_column(ForeignKey('evaluation_cases.id'), unique=True)
+    module_key: Mapped[str] = mapped_column(String(64))
+    input_payload: Mapped[dict] = mapped_column(JSON)
+    golden_output: Mapped[dict] = mapped_column(JSON)
+    replay_context: Mapped[dict] = mapped_column(JSON)
+    dataset_split: Mapped[str] = mapped_column(String(16), default='test')
+    tags: Mapped[list] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

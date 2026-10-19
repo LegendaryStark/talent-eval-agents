@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import { EvidencePackPanel } from "./EvidencePackPanel";
 import { EvaluationCenter } from "./EvaluationCenter";
+import { Dashboard } from "./Dashboard";
 import { TalentChatPage } from "./TalentChatPage";
 import "./style.css";
 import "./refinements.css";
@@ -527,7 +528,7 @@ function RecallLab({
 }
 
 function App() {
-  const [productSection, setProductSection] = useState<"records" | "chat" | "evaluation">("records");
+  const [productSection, setProductSection] = useState<"dashboard" | "records" | "chat" | "evaluation">("records");
   const [page, setPage] = useState<"roster" | "library">("roster");
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [kbs, setKbs] = useState<KB[]>([]);
@@ -708,7 +709,9 @@ function App() {
     }
   }
 
-  if (productSection === "evaluation") return <EvaluationCenter apiBase={API} onChat={() => setProductSection("chat")} onRecords={() => setProductSection("records")} />;
+  if (productSection === "dashboard") return <Dashboard apiBase={API} sidebarCollapsed={sidebarCollapsed} onToggleSidebar={() => setSidebarCollapsed(value=>!value)} onRecords={()=>setProductSection("records")} onChat={()=>setProductSection("chat")} onEvaluation={()=>setProductSection("evaluation")}/>;
+
+  if (productSection === "evaluation") return <EvaluationCenter sidebarCollapsed={sidebarCollapsed} onToggleSidebar={() => setSidebarCollapsed(value => !value)} apiBase={API} onDashboard={() => setProductSection("dashboard")} onChat={() => setProductSection("chat")} onRecords={() => setProductSection("records")} />;
 
   if (productSection === "chat") {
     return (
@@ -716,6 +719,7 @@ function App() {
         apiBase={API}
         sidebarCollapsed={sidebarCollapsed}
         onToggleSidebar={() => setSidebarCollapsed((value) => !value)}
+        onOpenDashboard={() => setProductSection("dashboard")}
         onOpenEvaluation={() => setProductSection("evaluation")}
         onOpenRecords={() => setProductSection("records")}
       />
@@ -747,7 +751,7 @@ function App() {
           </div>
         </div>
         <nav>
-          <button>
+          <button onClick={() => setProductSection("dashboard")}>
             <LayoutGrid />
             <span>工作台</span>
           </button>

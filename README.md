@@ -888,3 +888,65 @@ uv run --no-sync python -m scripts.verify_evaluation_center
 验收 Run `1e5a2d03-4db3-4897-86dc-b041277213fd` 完成报告，共采集 58 条 Case，其中事实抽取 54 条、失败 Case 1 条，两种反馈各 1 条。模型结果与数量可能变化。
 
 当前沿用课程单租户开发访问边界，没有新增身份认证；原文 Case 访问需要在部署前与既有 Run、人才材料接口统一实施授权。采集采用尽力写入，数据库失败会记录 `case_collection_failed`，不会阻断业务，也没有持久化补偿队列。岗位 Case 保存候选版本与规则版本，严格重放还需要固定当时岗位库。
+
+## 第 24 课 LLM Judge、Golden 审核与模块重放
+
+复用现有评测中心，新增两张表和手动批次接口，每批最多 20 条顺序执行，不引入队列、定时任务或实验平台。
+
+| 文件 | 用途与接口 |
+| --- | --- |
+| `backend/app/evaluation_judge.py` | `judge_case(case, golden_output=None)`：四模块评分和候选答案；`replay_output(item)`：调用当前人才要求理解函数 |
+| `backend/app/evaluation_api.py` | `POST /api/evaluation/judge` 接收 `case_ids`；`POST /cases/{case_id}/confirm` 接收完整 `golden_output`、`dataset_split` 和 `tags`；`GET /dataset`；`POST /replay` 接收 `dataset_item_ids`，以上均在 `/api/evaluation` 前缀下 |
+| `backend/app/models.py` | Annotation 以 Case 为主键，Dataset Item 以来源 Case 唯一，确认在同一事务中完成 |
+| `database/migrations/024_evaluation_judge.sql` | 幂等新增标注、数据集表及评分索引；`database/init.sql` 同步支持新库 |
+| `frontend/src/EvaluationCenter.tsx` | 模块、反馈、状态、时间、未标注及 0—2 分筛选，选择最多 20 条 Case 批量 Judge |
+| `frontend/src/EvaluationReview.tsx` | Golden 编辑和确认、数据集分页、选择条目与手动重放 |
+| `backend/tests/test_evaluation_judge.py` | 独立模型、错误隔离、审核入集、原始数据不变、固定输入及重放分母测试 |
+| `backend/scripts/verify_evaluation_judge.py` | `judge CASE_ID...`、`confirm CASE_ID GOLDEN_FILE`、`replay DATASET_ITEM_ID...` 三个手动步骤，不自动确认模型答案 |
+
+配置沿用 `.env` 中用户提供的 `get_judge_model()` 配置：`JUDGE_MODEL`、`JUDGE_API_KEY`、`JUDGE_BASE_URL`，通常使用不同于 `CHAT_MODEL` 的评判模型。缺少 Judge 配置时报错，不回退至 Chat 模型。四个业务模块重放仍调用 `get_chat_model()` 或模块原有确定性实现。修复 Chat 工厂 `model` 未定义的问题，未更改用户的模型选择。
+
+工程根目录迁移：
+
+```bash
+docker compose -p talent-eval-agents-course exec -T postgres \
+  psql -U talent -d talent_docs -v ON_ERROR_STOP=1 -f /dev/stdin \
+  < database/migrations/024_evaluation_judge.sql
+```
+
+启动 API 18080 和现有前端 15173，打开评测中心，筛选未标注 Case，选择条目后点击批量 Judge；查看原始输入、输出、得分和原因，编辑完整 Golden 后选择开发集或测试集并确认。数据集区可查看冻结快照并选择四个模块的条目重放。
+
+脚本从 `backend/` 运行，帮助入口：
+
+```bash
+uv run --no-sync python -m scripts.verify_evaluation_judge --help
+```
+
+`--api-base` 位于子命令之前，默认 `http://127.0.0.1:18080`。Case 和 Dataset ID 从页面或列表接口读取；`confirm` 显式读取经过复核的 JSON 文件。
+
+行为边界：
+
+- 原始 Case 不修改，标注状态以关联 Annotation 为准，历史 `annotation_status` 不参与新逻辑
+- 每条 Case 保留一次 Annotation，已有标注跳过，Judge 服务失败仍可手动重试
+- 原始模块失败规则标 0 分、候选为空；Judge 失败不产生质量分数
+- 人工可以不经过 Judge 直接填写 Golden，分数留空，结构校验不能代替业务复核
+- 确认后的 Dataset Item 不可覆盖，唯一来源约束防止重复确认，候选答案保留在 Annotation
+- 岗位评价不具备完整历史岗位库，不能评价完整召回率，规则明确唯一 exact 的优先级
+- 人才要求理解、岗位匹配、维度生成和事实抽取均按冻结输入重放，只执行对应模块，不运行整个 Graph
+- 重放失败的业务模块计 0 分；Judge 失败无分数；`complete=false` 时平均分仅代表已评分部分
+- 开发集用于调试，测试集用于固定回归，划分时应人工避免同一会话或近似样本跨集合
+- 继续使用课程现有访问边界，未新增用户认证和审核人审计体系
+
+验收产物在 `backend/artifacts/lesson24-annotations.json`、`lesson24-dataset.json`、`lesson24-replay.json` 和 `lesson24-replay-judge-error.json`，开发集样本由本次开发验收复核生成，不能等同于业务专家审核数据。
+
+验收结果：四模块成功 Case 分别得到 4、4、4、3 分，失败 Case 由规则标 0 分；固定开发集重放完成，单条及平均分为 3，业务模型 `qwen3.8-max`、Judge `gpt-5.5`。Judge 服务曾间歇返回 `InvalidEndpoint.ClosedEndpoint`，失败批次标记不完整，手动重试后完成。后端回归 289 passed、1 skipped，前端 15 passed，构建通过。
+
+### 评测中心页面布局
+
+评测中心沿用全局侧栏图标、品牌、环境标识和折叠状态，顶部区分“评测样例”和“数据集”。样例页默认展示全部 Case，“按 Run 分组查看”复选框与筛选项位于同一区域，低分 Case（0—2 分）可直接勾选筛选，支持整行打开详情，复选框独立选中。
+
+`GET /api/evaluation/cases?group_by=run&limit=10` 先对符合筛选的 Case 按 Run 聚合，再按 `completed_at` 倒序分页；返回会话标题、完成时间、Run ID 和筛选后的 Case 数。缺少完成时间的 Run 排在最后。每页 10 个 Run，分组默认折叠，展开后按每页 10 条懒加载 Case；默认列表每页 10 条。
+
+数据集 Tab 每页 10 条，以表格展示 split、模块、source_case_id 和创建时间，支持 split 与模块筛选，点击行查看固定输入与 Golden。所有模块的条目均可通过复选框选择，并沿用原有重放接口。更新后需要重启后端以加载分组查询参数，不涉及数据库迁移。
+
+工作台通过 `GET /api/dashboard/metrics` 展示员工数量、档案数量、总评估会话数、总评估轮次数、评测样例数和数据集条目数。指标直接基于现有业务表聚合，不新增缓存或统计表。

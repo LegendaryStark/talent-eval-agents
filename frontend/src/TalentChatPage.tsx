@@ -58,6 +58,7 @@ type Props = {
   apiBase: string;
   sidebarCollapsed: boolean;
   onToggleSidebar: () => void;
+  onOpenDashboard: () => void;
   onOpenRecords: () => void;
   onOpenEvaluation?: () => void;
 };
@@ -127,7 +128,7 @@ function stepStatusLabel(step: RunStep): string {
   return step.total ? `${step.completed || 0}/${step.total}` : "执行中";
 }
 
-export function TalentChatPage({ apiBase, sidebarCollapsed, onToggleSidebar, onOpenRecords, onOpenEvaluation }: Props) {
+export function TalentChatPage({ apiBase, sidebarCollapsed, onToggleSidebar, onOpenDashboard, onOpenRecords, onOpenEvaluation }: Props) {
   const [message, setMessage] = useState("我们正在为上海研发团队招聘一名高级 AI 应用工程师，要求至少 5 年后端或 AI 应用开发经验，并做过企业知识库和 Agent 评测项目。请基于现有简历给出候选人证据、风险和推荐结论");
   const [view, setView] = useState<RunView>(initialRunView);
   const [revision, setRevision] = useState("");
@@ -278,7 +279,7 @@ export function TalentChatPage({ apiBase, sidebarCollapsed, onToggleSidebar, onO
           <div><b>智鉴 TalentOS</b><small>多 AGENT 人才决策平台</small></div>
         </div>
         <nav>
-          <button><LayoutGrid /><span>工作台</span></button>
+          <button onClick={onOpenDashboard}><LayoutGrid /><span>工作台</span></button>
           <button onClick={onOpenRecords}><UserSquare2 /><span>人才档案</span></button>
           <button className="active"><Sparkles /><span>评估与推荐</span></button>
           <button onClick={onOpenEvaluation}><FlaskConical /><span>评测中心</span></button>
