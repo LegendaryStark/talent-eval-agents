@@ -20,20 +20,59 @@ def test_failed_case_does_not_call_judge(monkeypatch):
     result = j.judge_case(SimpleNamespace(status='failed', error_code='TimeoutError'))
     assert result.score == 0 and result.golden_candidate is None
 
-def test_judge_uses_separate_factory_and_schema(monkeypatch):
+def test_judge_uses_separate_factory_and_minimal_payload(monkeypatch):
     from app import evaluation_judge as j
     captured = []
+    schemas = []
     class Model:
-        def with_structured_output(self, schema, **kw): return self
+        def with_structured_output(self, schema, **kw):
+            schemas.append(schema)
+            return self
         def invoke(self, messages):
             captured.extend(messages)
-            return j.JudgeResult(score=2, verdict='needs_review', error_types=['omission'], reason='遗漏', golden_candidate=GOLDEN, confidence=.8)
+            return {'score': 2, 'error_types': ['omission'], 'reason': '遗漏', 'golden_candidate': GOLDEN, 'confidence': .8}
     monkeypatch.setattr(j, 'get_judge_model', lambda **kw: Model())
     case = SimpleNamespace(status='succeeded', module_key='request_understanding', input_payload={'messages': []}, output_payload=GOLDEN)
     assert j.judge_case(case).score == 2
-    assert 'output_schema' in captured[1][1]
+    payload = __import__('json').loads(captured[1][1])
+    assert set(payload) == {'module_key', 'task_contract', 'input', 'actual_output', 'generate_golden_candidate'}
+    assert 'output_schema' not in payload
+    assert 'previous_request' in payload['task_contract']
+    assert schemas == [j.JudgeResponse]
     monkeypatch.setattr(j, 'get_judge_model', lambda **kw: None)
     with pytest.raises(RuntimeError, match='JUDGE'): j.judge_case(case)
+
+
+def test_every_judge_module_has_a_task_contract():
+    from app import evaluation_judge as j
+    assert set(j.TASK_CONTRACTS) == {
+        'request_understanding', 'job_matching', 'dimension_generation', 'fact_extraction',
+    }
+    assert all(value.strip() for value in j.TASK_CONTRACTS.values())
+
+
+def test_invalid_actual_output_is_scored_without_calling_judge(monkeypatch):
+    from app import evaluation_judge as j
+    monkeypatch.setattr(j, 'get_judge_model', lambda **kw: pytest.fail('invalid output must be handled before Judge'))
+    case = SimpleNamespace(status='succeeded', module_key='request_understanding', input_payload={'messages': []}, output_payload={})
+    result = j.judge_case(case)
+    assert result.score == 0
+    assert result.error_types == ['output_schema_invalid']
+    assert result.golden_candidate is None
+
+
+def test_invalid_golden_candidate_keeps_the_judge_score(monkeypatch):
+    from app import evaluation_judge as j
+    class Model:
+        def with_structured_output(self, schema, **kw): return self
+        def invoke(self, messages):
+            return j.JudgeResult(score=2, verdict='needs_review', error_types=['omission'], reason='存在遗漏', golden_candidate={}, confidence=.8)
+    monkeypatch.setattr(j, 'get_judge_model', lambda **kw: Model())
+    case = SimpleNamespace(status='succeeded', module_key='request_understanding', input_payload={'messages': []}, output_payload=GOLDEN)
+    result = j.judge_case(case)
+    assert result.score == 2
+    assert result.golden_candidate is None
+    assert result.error_types == ['omission', 'golden_candidate_invalid']
 
 @pytest.fixture
 def client(monkeypatch):
@@ -83,6 +122,19 @@ def test_judge_outage_leaves_case_unannotated(client, monkeypatch):
     monkeypatch.setattr(api, 'judge_case', fail)
     assert c.post('/api/evaluation/judge', json={'case_ids':[cid]}).json()['items'][0]['status'] == 'error'
     assert len(c.get('/api/evaluation/cases?unannotated=true').json()['items']) == 1
+
+
+def test_invalid_judge_response_reports_the_validation_stage(client, monkeypatch):
+    from app import evaluation_api as api
+    from app.evaluation_judge import JudgeResponse
+    c, cid = client
+    def fail(case):
+        return JudgeResponse.model_validate({})
+    monkeypatch.setattr(api, 'judge_case', fail)
+    item = c.post('/api/evaluation/judge', json={'case_ids':[cid]}).json()['items'][0]
+    assert item['status'] == 'error'
+    assert item['error_type'] == 'ValidationError'
+    assert item['error_stage'] == 'judge_response'
 
 def test_replay_uses_frozen_inputs(monkeypatch):
     from app import evaluation_judge as j

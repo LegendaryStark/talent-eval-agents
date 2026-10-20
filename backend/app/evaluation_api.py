@@ -146,6 +146,9 @@ def batch_judge(payload: JudgeBatch):
                 results.append(dict(case_id=str(case_id), status='annotated', score=result.score))
         except IntegrityError:
             results.append(dict(case_id=str(case_id), status='skipped'))
+        except ValidationError:
+            results.append(dict(case_id=str(case_id), status='error',
+                error_type='ValidationError', error_stage='judge_response'))
         except Exception as exc:
             results.append(dict(case_id=str(case_id), status='error', error_type=type(exc).__name__))
     return {'items': results}

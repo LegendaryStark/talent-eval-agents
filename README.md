@@ -906,6 +906,8 @@ uv run --no-sync python -m scripts.verify_evaluation_center
 
 配置沿用 `.env` 中用户提供的 `get_judge_model()` 配置：`JUDGE_MODEL`、`JUDGE_API_KEY`、`JUDGE_BASE_URL`，通常使用不同于 `CHAT_MODEL` 的评判模型。缺少 Judge 配置时报错，不回退至 Chat 模型。四个业务模块重放仍调用 `get_chat_model()` 或模块原有确定性实现。修复 Chat 工厂 `model` 未定义的问题，未更改用户的模型选择。
 
+Judge payload 使用 JSON 区分 `task_contract`、`input`、`actual_output` 和可选 `reference_output`。四个模块各自提供精简任务契约，不把完整业务 Prompt 和 `output_schema` 发送给 Judge。实际输出在模型调用前通过模块 Schema 校验；Golden 候选在调用后校验，候选无效时保留评分并记录 `golden_candidate_invalid`。`verdict` 由程序根据分数生成。
+
 工程根目录迁移：
 
 ```bash
@@ -939,7 +941,7 @@ uv run --no-sync python -m scripts.verify_evaluation_judge --help
 
 验收产物在 `backend/artifacts/lesson24-annotations.json`、`lesson24-dataset.json`、`lesson24-replay.json` 和 `lesson24-replay-judge-error.json`，开发集样本由本次开发验收复核生成，不能等同于业务专家审核数据。
 
-验收结果：四模块成功 Case 分别得到 4、4、4、3 分，失败 Case 由规则标 0 分；固定开发集重放完成，单条及平均分为 3，业务模型 `qwen3.8-max`、Judge `gpt-5.5`。Judge 服务曾间歇返回 `InvalidEndpoint.ClosedEndpoint`，失败批次标记不完整，手动重试后完成。后端回归 289 passed、1 skipped，前端 15 passed，构建通过。
+验收结果：四模块成功 Case 分别得到 4、4、4、3 分，失败 Case 由规则标 0 分；固定开发集重放完成，单条及平均分为 3，业务模型 `qwen3.8-max`、Judge `gpt-5.5`。精简后的 Judge 使用真实人才要求理解 Case 返回 4 分、完整候选和 0.98 置信度。后端回归 293 passed、1 skipped，前端 15 passed，构建通过。
 
 ### 评测中心页面布局
 
