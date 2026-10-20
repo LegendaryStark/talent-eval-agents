@@ -906,7 +906,7 @@ uv run --no-sync python -m scripts.verify_evaluation_center
 
 配置沿用 `.env` 中用户提供的 `get_judge_model()` 配置：`JUDGE_MODEL`、`JUDGE_API_KEY`、`JUDGE_BASE_URL`，通常使用不同于 `CHAT_MODEL` 的评判模型。缺少 Judge 配置时报错，不回退至 Chat 模型。四个业务模块重放仍调用 `get_chat_model()` 或模块原有确定性实现。修复 Chat 工厂 `model` 未定义的问题，未更改用户的模型选择。
 
-Judge payload 使用 JSON 区分 `task_contract`、`input`、`actual_output` 和可选 `reference_output`。四个模块各自提供精简任务契约，不把完整业务 Prompt 和 `output_schema` 发送给 Judge。实际输出在模型调用前通过模块 Schema 校验；Golden 候选在调用后校验，候选无效时保留评分并记录 `golden_candidate_invalid`。`verdict` 由程序根据分数生成。
+Judge payload 使用 JSON 区分 `task_spec`、`input`、`actual_output` 和可选 `reference_output`。人才要求理解、动态维度生成和事实抽取直接复用各自运行时的原始任务 Prompt，岗位匹配使用对应的确定性路由规则；每次只发送当前模块的任务规范，不发送 `output_schema`。实际输出在模型调用前通过模块 Schema 校验；Golden 候选在调用后校验，候选无效时保留评分并记录 `golden_candidate_invalid`。`verdict` 由程序根据分数生成。
 
 工程根目录迁移：
 

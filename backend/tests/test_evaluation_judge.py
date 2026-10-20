@@ -35,20 +35,23 @@ def test_judge_uses_separate_factory_and_minimal_payload(monkeypatch):
     case = SimpleNamespace(status='succeeded', module_key='request_understanding', input_payload={'messages': []}, output_payload=GOLDEN)
     assert j.judge_case(case).score == 2
     payload = __import__('json').loads(captured[1][1])
-    assert set(payload) == {'module_key', 'task_contract', 'input', 'actual_output', 'generate_golden_candidate'}
+    assert set(payload) == {'module_key', 'task_spec', 'input', 'actual_output', 'generate_golden_candidate'}
     assert 'output_schema' not in payload
-    assert 'previous_request' in payload['task_contract']
+    assert 'previous_request' in payload['task_spec']
     assert schemas == [j.JudgeResponse]
     monkeypatch.setattr(j, 'get_judge_model', lambda **kw: None)
     with pytest.raises(RuntimeError, match='JUDGE'): j.judge_case(case)
 
 
-def test_every_judge_module_has_a_task_contract():
+def test_every_judge_module_has_a_task_spec():
     from app import evaluation_judge as j
-    assert set(j.TASK_CONTRACTS) == {
+    assert set(j.TASK_SPECS) == {
         'request_understanding', 'job_matching', 'dimension_generation', 'fact_extraction',
     }
-    assert all(value.strip() for value in j.TASK_CONTRACTS.values())
+    assert j.TASK_SPECS['request_understanding'].startswith('你是人才评估任务编译器')
+    assert j.TASK_SPECS['dimension_generation'] == j.DIMENSION_GENERATOR_PROMPT
+    assert j.TASK_SPECS['fact_extraction'] == j.EXTRACTION_PROMPT
+    assert all(value.strip() for value in j.TASK_SPECS.values())
 
 
 def test_invalid_actual_output_is_scored_without_calling_judge(monkeypatch):
