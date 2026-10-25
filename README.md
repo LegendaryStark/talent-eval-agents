@@ -895,7 +895,7 @@ uv run --no-sync python -m scripts.verify_evaluation_center
 
 | 文件 | 用途与接口 |
 | --- | --- |
-| `backend/app/evaluation_judge.py` | `judge_case(case, golden_output=None)`：四模块评分和候选答案；`replay_output(item)`：调用当前人才要求理解函数 |
+| `backend/app/evaluation_judge.py` | `judge_case(case, golden_output=None)`：四模块评分、候选答案与 Judge Prompt 脱敏；`replay_output(item)`：调用当前人才要求理解函数 |
 | `backend/app/evaluation_api.py` | `POST /api/evaluation/judge` 接收 `case_ids`；`POST /cases/{case_id}/confirm` 接收完整 `golden_output`、`dataset_split` 和 `tags`；`GET /dataset`；`POST /replay` 接收 `dataset_item_ids`，以上均在 `/api/evaluation` 前缀下 |
 | `backend/app/models.py` | Annotation 以 Case 为主键，Dataset Item 以来源 Case 唯一，确认在同一事务中完成 |
 | `database/migrations/024_evaluation_judge.sql` | 幂等新增标注、数据集表及评分索引；`database/init.sql` 同步支持新库 |
@@ -906,7 +906,7 @@ uv run --no-sync python -m scripts.verify_evaluation_center
 
 配置沿用 `.env` 中用户提供的 `get_judge_model()` 配置：`JUDGE_MODEL`、`JUDGE_API_KEY`、`JUDGE_BASE_URL`，通常使用不同于 `CHAT_MODEL` 的评判模型。缺少 Judge 配置时报错，不回退至 Chat 模型。四个业务模块重放仍调用 `get_chat_model()` 或模块原有确定性实现。修复 Chat 工厂 `model` 未定义的问题，未更改用户的模型选择。
 
-Judge payload 使用 JSON 区分 `task_spec`、`input`、`actual_output` 和可选 `reference_output`。人才要求理解、动态维度生成和事实抽取直接复用各自运行时的原始任务 Prompt，岗位匹配使用对应的确定性路由规则；每次只发送当前模块的任务规范，不发送 `output_schema`。实际输出在模型调用前通过模块 Schema 校验；Golden 候选在调用后校验，候选无效时保留评分并记录 `golden_candidate_invalid`。`verdict` 由程序根据分数生成。
+Judge 输入使用 JSON 区分 `task_spec`、`input`、`actual_output` 和可选 `reference_output`。人才要求理解、动态维度生成和事实抽取直接复用各自运行时的原始任务 Prompt，岗位匹配使用对应的确定性路由规则；每次只发送当前模块的任务规范，不发送 `output_schema`。实际输出在模型调用前通过模块 Schema 校验；Golden 候选在调用后校验，候选无效时保留评分并记录 `golden_candidate_invalid`。`verdict` 由程序根据分数生成。
 
 工程根目录迁移：
 
@@ -952,3 +952,28 @@ uv run --no-sync python -m scripts.verify_evaluation_judge --help
 数据集 Tab 每页 10 条，以表格展示 split、模块、source_case_id 和创建时间，支持 split 与模块筛选，点击行查看固定输入与 Golden。所有模块的条目均可通过复选框选择，并沿用原有重放接口。更新后需要重启后端以加载分组查询参数，不涉及数据库迁移。
 
 工作台通过 `GET /api/dashboard/metrics` 展示员工数量、档案数量、总评估会话数、总评估轮次数、评测样例数和数据集条目数。指标直接基于现有业务表聚合，不新增缓存或统计表。
+
+## 第 25 课外部模型数据脱敏与出站防护
+
+| 路径 | 用途 |
+| --- | --- |
+| `backend/scripts/verify_langchain_pii.py` | 使用本地回显模型展示 `PIIMiddleware` 的 `redact`、`mask`、`hash` 和 `block` 实际输出 |
+| `backend/app/prompt_sanitizer.py` | `sanitize_prompt(original_prompt)` 把原始 Prompt 字符串转换为脱敏字符串 |
+| `backend/app/evaluation_judge.py` | Judge 在调用外部模型前对用户 Prompt 执行一次脱敏 |
+| `backend/tests/test_prompt_sanitizer.py` | 覆盖姓名、手机号、邮箱、身份证号和重复值替换 |
+| `backend/tests/test_verify_langchain_pii.py` | 固定 LangChain 四种 PII 策略的演示输出 |
+
+默认规则检测带标签的中文姓名、中国大陆手机号、邮箱和身份证号。函数只接收一个 `str`，并返回一个脱敏后的 `str`。同一原值在一次转换中使用同一占位符。
+
+定向验证：
+
+```bash
+cd backend
+uv run --no-sync python -m scripts.verify_langchain_pii
+
+uv run --no-sync pytest -q \
+  tests/test_prompt_sanitizer.py \
+  tests/test_evaluation_judge.py::test_judge_redacts_pii_before_external_model_call
+```
+
+全量后端回归为 `297 passed, 1 skipped`。当本机设置 SOCKS 代理但当前 `httpx` 未安装 `socksio` 时，构造 `ChatOpenAI` 的工厂测试会先因代理依赖失败；应补齐 `httpx[socks]` 或在本次本地回归中取消该代理环境变量。

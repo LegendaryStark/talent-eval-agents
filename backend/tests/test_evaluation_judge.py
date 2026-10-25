@@ -43,6 +43,46 @@ def test_judge_uses_separate_factory_and_minimal_payload(monkeypatch):
     with pytest.raises(RuntimeError, match='JUDGE'): j.judge_case(case)
 
 
+def test_judge_redacts_pii_before_external_model_call(monkeypatch):
+    from app import evaluation_judge as j
+
+    captured = []
+
+    class Model:
+        def with_structured_output(self, schema, **kwargs):
+            return self
+
+        def invoke(self, messages):
+            captured.extend(messages)
+            return {
+                'score': 4,
+                'error_types': [],
+                'reason': '候选人 __PII_PERSON_001__ 的结果完整',
+                'golden_candidate': None,
+                'confidence': 0.9,
+            }
+
+    monkeypatch.setattr(j, 'get_judge_model', lambda **kwargs: Model())
+    case = SimpleNamespace(
+        status='succeeded',
+        module_key='request_understanding',
+        input_payload={'messages': [{
+            'role': 'human',
+                'content': '候选人姓名：张伟，手机 13812345678，邮箱 zhangwei@example.com',
+        }]},
+        output_payload=GOLDEN,
+    )
+
+    result = j.judge_case(case)
+
+    outbound = captured[1][1]
+    assert '张伟' not in outbound
+    assert '13812345678' not in outbound
+    assert 'zhangwei@example.com' not in outbound
+    assert '__PII_PERSON_001__' in outbound
+    assert result.reason == '候选人 __PII_PERSON_001__ 的结果完整'
+
+
 def test_every_judge_module_has_a_task_spec():
     from app import evaluation_judge as j
     assert set(j.TASK_SPECS) == {

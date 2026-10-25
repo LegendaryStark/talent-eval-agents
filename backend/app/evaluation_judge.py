@@ -4,6 +4,7 @@ from typing import Literal
 from pydantic import BaseModel, Field, ValidationError
 from langchain.messages import HumanMessage, AIMessage, SystemMessage
 from app.model_provider import get_chat_model, get_judge_model
+from app.prompt_sanitizer import sanitize_prompt
 from app.talent_decision_graph import DecisionContext
 from app.talent_request_graph import (
     TalentRequestUnderstanding,
@@ -80,16 +81,18 @@ def judge_case(case, *, golden_output=None):
     model = get_judge_model(temperature=0)
     if model is None:
         raise RuntimeError('请配置 JUDGE_MODEL、JUDGE_API_KEY、JUDGE_BASE_URL')
-    payload = dict(module_key=case.module_key, task_spec=TASK_SPECS[case.module_key],
+    judge_input = dict(module_key=case.module_key, task_spec=TASK_SPECS[case.module_key],
                    input=case.input_payload, actual_output=actual_output,
                    generate_golden_candidate=golden_output is None)
     if golden_output is not None:
         try:
-            payload['reference_output'] = schema.model_validate(golden_output).model_dump(mode='json')
+            judge_input['reference_output'] = schema.model_validate(golden_output).model_dump(mode='json')
         except ValidationError as exc:
             raise ValueError('固定 Golden 不符合当前模块的输出 Schema') from exc
+    original_prompt = json.dumps(judge_input, ensure_ascii=False)
+    safe_prompt = sanitize_prompt(original_prompt)
     response = model.with_structured_output(JudgeResponse, method='function_calling').invoke([
-        ('system', JUDGE_PROMPT), ('user', json.dumps(payload, ensure_ascii=False))])
+        ('system', JUDGE_PROMPT), ('user', safe_prompt)])
     response_data = response.model_dump() if isinstance(response, BaseModel) else response
     response = JudgeResponse.model_validate(response_data)
     verdict = 'pass' if response.score >= 3 else 'failed' if response.score == 0 else 'needs_review'
